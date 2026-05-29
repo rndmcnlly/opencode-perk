@@ -224,6 +224,39 @@ else is plumbing.
 
 ---
 
+## Findings during implementation (verified while building perk.ts)
+
+### The plugin can be instantiated more than once per process
+
+**This is the load-bearing implementation finding.** The `Plugin` function body
+ran **twice** in a single `opencode serve` process (confirmed: "loading plugin"
+logged twice, and two independent closures observed). The failure it caused:
+
+- A `perk_*` tool call (running in instance A) enqueued a wake into A's mailbox.
+- The `session.idle` event hook fired in instance B, whose mailbox was empty.
+- B's `drain` saw nothing; A's queued wake was stranded forever.
+
+Symptom: the first wake of a burst delivered fine (same instance handled both
+the inject and the immediately-following idle), but a wake **queued behind a
+busy turn** never drained on the next idle. Looked like a race in the idle gate;
+was actually fragmented state across instances.
+
+**Fix (do this in any harness with the same property): keep all mutable state in
+a process-wide singleton, not in the plugin-function closure.** perk hangs a
+single `PerkState` object off `globalThis` and starts exactly one poll loop
+(guarded by a `pollStarted` flag). Each instance only wires its live `client`
+into a shared `inject` slot (latest live client wins). After the singleton
+refactor, the multi-wake serialization test passes regardless of instance count.
+
+### Multi-wake serialization (verified)
+
+Two listeners fired in the same idle window: the first injects (session goes
+busy), the second stays queued in the per-session FIFO mailbox and drains on the
+**next** `session.idle`, with no external nudge. Delivered in registration order.
+This exercises README commitment 4 (turns serialized, never torn) directly.
+
+---
+
 ## Open questions / risks for the fresh session
 
 1. **Multi-session state.** The probe used one session. Confirm a listener
