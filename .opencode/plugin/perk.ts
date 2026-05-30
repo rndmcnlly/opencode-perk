@@ -19,7 +19,7 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { statSync } from "node:fs"
+import { statSync, appendFileSync } from "node:fs"
 
 // ---------------------------------------------------------------------------
 // Sense organ: snapshot a path's existence + mtime + size.
@@ -136,7 +136,26 @@ function getState(): PerkState {
   return g[GLOBAL_KEY] as PerkState
 }
 
-const log = (...a: unknown[]) => console.error("[perk]", ...a)
+// Logging: NEVER write to stdout/stderr. When perk runs inside the opencode
+// TUI, the renderer owns that surface and our writes corrupt the display
+// (observed in a trial run). Append to a file instead. Opt out / redirect via
+// PERK_LOG (set to "" or "off" to silence). Failures here are swallowed:
+// logging must never break the channel.
+const LOG_PATH =
+  process.env.PERK_LOG === undefined ? "/tmp/perk.log" : process.env.PERK_LOG
+const log = (...a: unknown[]) => {
+  if (!LOG_PATH || LOG_PATH === "off") return
+  try {
+    const line = a
+      .map((x) =>
+        typeof x === "string" ? x : JSON.stringify(x),
+      )
+      .join(" ")
+    appendFileSync(LOG_PATH, `${new Date().toISOString()} [perk] ${line}\n`)
+  } catch {
+    // never let logging break the channel
+  }
+}
 
 function enqueue(S: PerkState, sessionID: string, wake: Wake) {
   const box = S.mailboxes.get(sessionID) ?? []
@@ -205,8 +224,15 @@ function startPoll(S: PerkState) {
       } else {
         // Keep the baseline current for non-matching changes so a stale
         // baseline cannot manufacture a phantom edge later.
+        //
+        // create: we are waiting for an absent->present edge. If the file is
+        // currently absent, advance the baseline INTO that absence so a later
+        // return registers as a real edge. (Previously we only advanced when
+        // present, which erased a transient absence and made an acked
+        // create-listener unable to ever fire on absent->present.) When
+        // present and non-matching, the baseline is already present; leave it.
         if (l.on === "change") l.baseline = now
-        if (l.on === "create" && now.exists) l.baseline = now
+        if (l.on === "create" && !now.exists) l.baseline = now
         if (l.on === "delete" && !now.exists) l.baseline = now
       }
     }

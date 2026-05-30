@@ -255,6 +255,86 @@ busy), the second stays queued in the per-session FIFO mailbox and drains on the
 **next** `session.idle`, with no external nudge. Delivered in registration order.
 This exercises README commitment 4 (turns serialized, never torn) directly.
 
+### noReply backlog must self-reschedule (verified)
+
+A `reply: false` wake injects context but runs **no turn**, so it emits no
+`session.idle`. Nothing would re-invoke `drain`, so a backlog of context-only
+notes behind one such wake would stall. Fix: after a successful noReply inject,
+if items remain and the session is still idle, `setTimeout(drain, 0)` to flush
+the next one. Reply wakes still pace on real idle events. Either way: strictly
+one wake per tick, FIFO. Verified: two noReply notes, one idle event, both
+delivered.
+
+### create-listener baseline must advance INTO absence (verified)
+
+Found via the self-test trial run. An `on:create` listener that was `perk_ack`-ed
+while its file *existed* could **never** fire on a later absent->present edge.
+Root cause: the poll's baseline-maintenance only advanced the baseline when the
+file was present (`if (l.on === "create" && now.exists)`), so a transient
+absence was erased: the baseline stayed `{exists:true}`, and `matches("create")`
+(which needs `!base.exists && now.exists`) could never become true. Fix: advance
+the baseline **into** absence instead (`if (l.on === "create" && !now.exists)`).
+This is phantom-edge safe: advancing into absence is the only correct
+armed-and-waiting state for a create listener, and the next present is a genuine
+edge. Verified live: ack-while-present, then delete, then return -> fired.
+
+### Never write logs to stdout/stderr inside the TUI (fixed)
+
+Found via the trial run. `console.error("[perk]", ...)` wrote to stderr, which
+the opencode TUI shares as its draw surface; the log lines corrupted the
+display. **Any plugin running inside the TUI process must not touch the raw
+stdout/stderr the renderer owns.** perk now appends to a log file
+(`/tmp/perk.log`, configurable via `PERK_LOG`, `off` to silence) and swallows
+logging errors so logging can never break the channel. Verified: zero `[perk]`
+lines leak to the serve output; all events land in the log file.
+
+### Baseline hygiene beats timing in testing
+
+A trial-run "phantom re-fire" (a disarmed listener appearing to wake) was traced
+to operator error, not a defect: a polluted baseline (leftover file + racey
+`rm`/backgrounded-`touch` on one shell line) produced a genuine *extra* fire that
+the FIFO mailbox faithfully delivered one turn late. The tell was `perk_list`:
+`triggerCount` and `lastFired` were unchanged, so no actual re-fire occurred. The
+edge-trigger/mailbox bookkeeping is correct as written. Lesson (now in
+TESTING.md): start every test from a verified-clean baseline and confirm
+`baselineExists` before scheduling the trigger. `POLL_MS = 300` is fine; timing
+is not the fragile part.
+
+### Test-harness ergonomics (full-protocol run; all 7 tests passed, no code bugs)
+
+A second agent ran the entire TESTING.md protocol end to end: all seven tests
+passed, the mechanism is sound, and *every* friction point was in the
+choreography of driving the plugin from a slow, turn-based agent, not in the
+plugin. The high-value fixes (now in TESTING.md):
+
+- **Detached triggers are mandatory.** `(sleep N && touch ...) &` from an agent's
+  `bash` tool is reaped when the tool call returns: the backgrounded subshell is
+  a child of the tool's shell and stays in its process group. Triggers die before
+  firing; symptom is a never-arriving wake or a stale `baselineExists: true`. Use
+  `nohup zsh -c '...' >/dev/null 2>&1 & disown`. Verified empirically: a detached
+  trigger survives across the tool-call boundary and fires; a `disown`ed job
+  leaves the shell job table yet stays alive in `pgrep`.
+- **Sleep must outlast a turn.** Agent per-turn latency can be ~10s, and you
+  register on the turn *after* you schedule, so a `sleep 5` fires before you arm.
+  Canonical value raised to `sleep 20`. This is distinct from baseline pollution:
+  plain turn latency breaks a short sleep even with clean commands.
+- **Silence tests need a specified wait + objective post-check.** Tests 2/6/7
+  verify a listener does NOT wake the agent. Without a stated wait, a too-short
+  wait yields a false pass (trigger had not fired yet). Each silence test now
+  gives a concrete wait (`trigger_sleep + 5s`) and a `perk_list`-backed check:
+  `triggerCount` proves the fire happened, the absence of a response turn proves
+  the silence. Negative tests now leave hard evidence, not vibes.
+- **Cancel finished listeners; don't ack them.** Acking re-snapshots the baseline
+  from current state, which can strand a listener irrelevant to its intent (e.g.
+  acking a `delete` listener while the target is already gone leaves it unable to
+  fire). Tidy `pendingAck` with `perk_cancel`, not `perk_ack`.
+
+The agent explicitly endorsed keeping as-is: the rich `perk_list` schema
+(`armed`/`status`/`needsAck`/`triggerCount`/`lastFired`/`pendingAck`), which lets
+a tester *prove* each test rather than infer it; the disarm-on-fire edge-trigger
+default as the correct safety posture; and FIFO idle-gated drain working with
+zero external nudges.
+
 ---
 
 ## Open questions / risks for the fresh session
