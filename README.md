@@ -35,22 +35,22 @@ the same door.
 
 ## How it works (the pattern)
 
-Three primitives, all of which most harnesses already have:
+Two primitives, both of which most harnesses already have:
 
 1. **A way to inject a turn into a session** out of band (here:
    opencode's fire-and-forget `client.session.promptAsync`).
-2. **An idle signal** so injection never tears a turn in progress (here:
-   the `session.idle` event).
-3. **A sense organ** that watches the observable. perk uses a **stat-poll loop**
+2. **A sense organ** that watches the observable. perk uses a **stat-poll loop**
    over registered filesystem paths: presence, mtime, and size. The filesystem
    is the substrate, so anything that can `touch` a file becomes an event source
    (a timer is `sleep N && touch`; a job is `... && touch done`; a webhook
    receiver writes a file).
 
-When a watched path changes, perk enqueues the model's pre-authored wake message
-into a per-session FIFO mailbox, and delivers it **only when that session is
-idle**. One mailbox, in order, no interrupts. Race-safety is the whole point;
-everything else is plumbing.
+When a watched path changes, perk injects a turn into the registering session
+**the instant it sees the change**, describing what happened. No queue, no idle
+gate, no canned message: the wake text is generated from the listener id, the
+path, and the observed transition. perk does not try to avoid landing a turn
+mid-flight; an agent that cannot tolerate an interleaved notification should not
+be using perk.
 
 It is **edge-triggered**: a listener fires once, then disarms. The model must
 `ack` to re-arm. This keeps a flapping file from spamming the conversation and
@@ -60,24 +60,25 @@ makes the model's attention deliberate.
 
 Drop [`.opencode/plugin/perk.ts`](.opencode/plugin/perk.ts) into your project's
 `.opencode/plugin/` directory. It is auto-discovered, no config entry needed.
-Boot opencode in that project and the four `perk_*` tools are available to the
+Boot opencode in that project and the three `perk_*` tools are available to the
 model.
 
 ## Tool surface
 
 | Tool | What it does |
 | --- | --- |
-| `perk_register({ path, on, message, reply? })` | Arm a listener. `on` is `"create" \| "change" \| "delete"`. `message` is the turn you receive when it fires. `reply` defaults to `true` (the wake is a real turn you respond to); set `false` to inject context-only. Returns an `id`. |
-| `perk_list()` | Show listeners with armed state and trigger stats. Surfaces unacknowledged edges as `status: "fired-needs-ack"` plus a top-level `pendingAck` count. |
+| `perk_register({ path })` | Watch a path. The next change (appears, disappears, or contents change) hands you a turn saying so. Edge-triggered: fires once, then disarms. Returns an `id`. |
 | `perk_ack({ id })` | Re-arm a listener that has fired (takes a fresh baseline). |
-| `perk_cancel({ id })` | Remove a listener. |
+| `perk_cancel({ id })` | Stop watching: remove a listener. |
 
-**Baseline semantics:** `perk_register` snapshots the path *now* and fires only
-on a transition away from that baseline. A path that already exists at register
-time does not fire `on: "create"` until it goes absent and returns.
+**Baseline semantics:** `perk_register` snapshots the path *now* and fires on
+the first observed change away from that baseline: a path appearing,
+disappearing, or its mtime/size changing. There is no need to declare which kind
+of change you expect; perk reports what it saw and you decide what it means.
 
-The injected turn is just text the model authored at registration time, handed
-back to it later: a note-to-future-self that arrives when the world is ready.
+The injected turn names the listener id, the path, and the observed transition,
+plus a reminder that the listener is now disarmed (ack to re-arm, cancel to
+stop). The model decides what to do on waking.
 
 ## Example: a non-blocking background job
 
@@ -106,10 +107,9 @@ to them and keeps its value as the general "react to any observable" mechanism.
 ## Steal this
 
 The reference implementation targets one harness, but the pattern is portable.
-If your harness can (1) inject a turn into a live session, and (2) tell you when
-that session is idle, you can build perk on top of it. The watcher can be
-anything that produces a signal; the filesystem is just the cheapest universal
-one.
+If your harness can inject a turn into a live session, you can build perk on top
+of it. The watcher can be anything that produces a signal; the filesystem is
+just the cheapest universal one.
 
 ## Try it / verify it
 
@@ -117,13 +117,6 @@ one.
 it walks the model through arming listeners, changing files with its own `bash`,
 and observing itself getting woken. Point your agent at it to confirm the
 primitive end to end (and to feel the round-trip from the inside).
-
-## Design notes
-
-The original design brief (the *why*, and the commitments not to drift from) is
-in [`DESIGN.md`](./DESIGN.md). The verified implementation findings against
-opencode (the *how*, with citations into the installed SDK types) are in
-[`RESEARCH.md`](./RESEARCH.md).
 
 ## Name
 
