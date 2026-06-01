@@ -22,11 +22,25 @@
  *     observed transition.
  *
  * What remains: register a path, fire a turn on change. Re-arm with ack.
+ *
+ * On top of that core, perk offers ONE convenience tool, perk_bash_background,
+ * that runs a shell command as a detached fire-and-forget job and arms a
+ * listener on the command's exit-code sentinel. It exists as a SEPARATE tool
+ * (not a hook on the builtin bash) on purpose (issue #2): a bash hook had to
+ * silently rewrite the agent's `command` into detach scaffolding, and that
+ * rewritten command was what landed in the transcript. Since the transcript is
+ * the agent's only memory, the agent would later read scaffolding it never
+ * typed and conclude it had erred. A dedicated tool records exactly what the
+ * agent typed; the scaffolding lives inside the tool implementation where it
+ * belongs and never surfaces as a phantom edit to the agent's own words.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { statSync, appendFileSync, readFileSync } from "node:fs"
+import { statSync, appendFileSync, readFileSync, mkdirSync } from "node:fs"
+import { spawn } from "node:child_process"
+import { join } from "node:path"
+import { randomBytes } from "node:crypto"
 
 // ---------------------------------------------------------------------------
 // Sense organ: snapshot a path's existence + mtime + size.
@@ -68,10 +82,16 @@ type Listener = {
   sessionID: string // which session to wake; captured from ToolContext
   armed: boolean // edge-trigger: false after firing, until ack re-arms
   baseline: Snapshot // the snapshot we compare against; reset on ack
-  // When set, this listener was armed by a backgrounded bash job (perk arg).
-  // On fire we read the sentinel's contents (the bare exit code) and report it,
-  // and we phrase the wake as a job completion rather than a generic change.
-  job?: { command: string }
+  // Set when this listener watches a perk_bash_background job's exit-code file.
+  // The exit file (= `path`) is ONE-SHOT: the job writes its exit code once and
+  // is done, so re-arming is meaningless. Job listeners therefore AUTO-REMOVE
+  // on fire (not disarm-and-await-ack), and the wake reports the exit code plus
+  // the byte sizes of the captured stdout/stderr files (so the agent can decide
+  // whether to read them). We never store or echo the command body: it can be
+  // huge, and the agent already has it in its own tool call. perk generates all
+  // three files (.exit/.out/.err) under the project .perk/ dir; the agent does
+  // not choose or even see them until the wake.
+  job?: { out: string; err: string }
 }
 
 const POLL_MS = 300
@@ -93,9 +113,12 @@ type PerkState = {
   // until at least one instance has loaded.
   inject: ((sessionID: string, message: string) => Promise<void>) | null
   pollStarted: boolean
-  // Correlates a backgrounded bash call between the before/after hooks, keyed
-  // by the tool callID. Holds the perk listener id and chosen sentinel path.
-  jobByCall: Map<string, { id: string; sentinel: string }>
+  // perk_wait parks resolvers here. When a listener fires, the poll loop
+  // injects the verdict FIRST (so the detail turn is enqueued before the
+  // agent's turn ends), then resolves every parked waiter. Used only by
+  // headless runs (opencode run) where ending a turn exits the process and the
+  // out-of-band inject would otherwise arrive into nothing; see perk_wait.
+  waiters: Set<() => void>
 }
 
 const GLOBAL_KEY = "__perk_state__"
@@ -108,7 +131,7 @@ function getState(): PerkState {
       nextId: 1,
       inject: null,
       pollStarted: false,
-      jobByCall: new Map(),
+      waiters: new Set(),
     } satisfies PerkState
   }
   return g[GLOBAL_KEY] as PerkState
@@ -137,57 +160,95 @@ function startPoll(S: PerkState) {
   if (S.pollStarted) return
   S.pollStarted = true
   const timer = setInterval(() => {
+    // Collect everything that fired this tick, so we can inject all verdicts
+    // BEFORE waking any parked perk_wait. The ordering matters in headless runs
+    // (see PerkState.waiters): the verdict turn must be enqueued before the
+    // agent's wait returns and its turn ends.
+    const fired: { sessionID: string; message: string }[] = []
+    const remove: string[] = [] // job listeners auto-removed after this tick
     for (const l of S.listeners.values()) {
       if (!l.armed) continue
       const now = snapshot(l.path)
       const what = describe(l.baseline, now)
-      if (what) {
-        // Edge-trigger: fire once, then disarm. ack re-arms.
-        l.armed = false
-        l.baseline = now // so an immediate ack re-baselines from here
-        log("fired", { id: l.id, path: l.path, what })
-        let message: string
-        if (l.job) {
-          // Backgrounded bash job: the sentinel holds the bare exit code.
-          let code = "?"
-          try {
-            code = readFileSync(l.path, "utf8").trim() || "?"
-          } catch {
-            // sentinel vanished or unreadable; report what we can
-          }
-          const verdict =
-            code === "0"
-              ? "exited cleanly (0)"
-              : code === "?"
-                ? "finished (exit code unreadable)"
-                : `exited with code ${code}`
-          message =
-            `[perk:${l.id}] background command ${verdict}: ${l.job.command}. ` +
-            `Sentinel ${l.path} (perk_cancel ${l.id} to drop the listener).`
-        } else {
-          message =
-            `[perk:${l.id}] watched path ${l.path} ${what}. ` +
-            `This listener is now disarmed; perk_ack ${l.id} to re-arm it, ` +
-            `or perk_cancel ${l.id} to stop watching.`
+      if (!what) continue
+      l.armed = false // edge-trigger: stop re-firing this tick regardless
+      l.baseline = now
+      log("fired", { id: l.id, path: l.path, what, job: !!l.job })
+      let message: string
+      if (l.job) {
+        // Backgrounded job: ONE-SHOT exit file holding the bare exit code. Read
+        // the code, then mark this listener for removal: re-arming a finished
+        // job makes no sense, and we do not want dead job listeners piling up
+        // or being accidentally perk_ack'd back to life. Identify by id only;
+        // never replay the (possibly huge) command body. Report the captured
+        // stdout/stderr by path + byte size so the agent can decide what (if
+        // anything) is worth reading.
+        let code = "?"
+        try {
+          code = readFileSync(l.path, "utf8").trim() || "?"
+        } catch {
+          // exit file vanished or unreadable; report what we can
         }
-        if (S.inject) {
-          void S.inject(l.sessionID, message).catch((e) =>
-            log("inject failed", { id: l.id, error: String(e) }),
+        const verdict =
+          code === "0"
+            ? "exited cleanly (exit 0)"
+            : code === "?"
+              ? "finished (exit code unreadable)"
+              : `exited with code ${code}`
+        const outBytes = snapshot(l.job.out).size
+        const errBytes = snapshot(l.job.err).size
+        message =
+          `[perk:${l.id}] background job ${verdict}. ` +
+          `stdout: ${outBytes} bytes (${l.job.out}). ` +
+          `stderr: ${errBytes} bytes (${l.job.err}). ` +
+          `Read those files only if a size above suggests something useful. ` +
+          `The job is done and this listener has been auto-removed (no ack ` +
+          `needed). If you ran perk_wait, it has returned too; act on this.`
+        remove.push(l.id)
+      } else {
+        message =
+          `[perk:${l.id}] watched path ${l.path} ${what}. ` +
+          `This listener is now disarmed; perk_ack ${l.id} to re-arm it, ` +
+          `or perk_cancel ${l.id} to stop watching.`
+      }
+      fired.push({ sessionID: l.sessionID, message })
+    }
+
+    for (const id of remove) S.listeners.delete(id)
+
+    if (fired.length === 0) return
+
+    // Inject all verdicts, THEN release any parked perk_wait. We do not block
+    // the poll tick on this; the ordering guarantee is only within this async
+    // chain (inject awaited before resolve), which is all perk_wait relies on.
+    void (async () => {
+      if (S.inject) {
+        for (const f of fired) {
+          await S.inject(f.sessionID, f.message).catch((e) =>
+            log("inject failed", { error: String(e) }),
           )
         }
       }
-    }
+      if (S.waiters.size > 0) {
+        const release = [...S.waiters]
+        S.waiters.clear()
+        log("waking perk_wait", { count: release.length })
+        for (const resolve of release) resolve()
+      }
+    })()
   }, POLL_MS)
   if (typeof timer.unref === "function") timer.unref()
 }
 
-// Arm a listener and return its id. Shared by perk_register and the perk-arg
-// bash augmentation. `job` marks listeners spawned by a backgrounded command.
+// Arm a listener and return its id. Shared by perk_register and
+// perk_bash_background. `job` (the out/err capture paths) marks a one-shot job
+// exit-code file: such listeners auto-remove on fire (see Listener.job) and
+// report an exit code plus captured-output sizes.
 function arm(
   S: PerkState,
   path: string,
   sessionID: string,
-  job?: { command: string },
+  job?: { out: string; err: string },
 ): string {
   const id = `perk_${S.nextId++}`
   const listener: Listener = {
@@ -209,48 +270,77 @@ function arm(
   return id
 }
 
-// Wrap a user command so it runs as a true fire-and-forget background job: the
-// tool call returns immediately, the job survives the tool shell's teardown,
-// output is discarded, and the command's bare exit code lands in `sentinel`.
+// Run a user command as a true fire-and-forget background job: the tool call
+// returns immediately, the job survives this process's teardown, stdout/stderr
+// are captured to files, and the command's bare exit code lands in the exit
+// file (the one-shot completion sentinel the listener watches).
 //
-// Two independent properties are required, and BOTH were established empirically
-// (FEEDBACK2): returning fast and surviving teardown are NOT the same thing.
+// Because perk_bash_background spawns the job ITSELF (from the plugin's Node
+// process) rather than riding inside opencode's bash tool shell, detachment is
+// handled by Node's spawn options, not by the nohup/disown/fd-severing dance a
+// shared shell required (issue #2 retired the bash hook that needed those):
 //
-//   1. Return immediately. opencode's bash tool returns on stdout/stderr pipe
-//      EOF, not on foreground-process exit. A backgrounded child that inherits
-//      the tool's fds holds the pipe open, so the call blocks for the job's full
-//      duration. We sever ALL THREE fds (>/dev/null 2>&1 </dev/null) so the pipe
-//      hits EOF at once. (stdin matters too: an inherited stdin keeps it open.)
+//   - detached: true        -> new session/process group; not killed when the
+//                              parent (opencode) exits or its group is signalled.
+//   - stdio: "ignore"       -> child holds no pipe back to us, so we never block
+//                              on its output and there is nothing to drain.
+//   - child.unref()         -> the parent's event loop does not wait on the child.
 //
-//   2. Survive teardown. When the tool's shell exits it can SIGHUP / reap its
-//      children. `setsid` returns fast but its child was KILLED during teardown
-//      in this environment; only `nohup ... &` + `disown` survived. `nohup`
-//      ignores SIGHUP; `disown` drops the job from the shell's job table.
-//
-// The exit-code capture runs INSIDE the detached `sh -c`, before its own fds are
-// severed, so the sentinel write still happens. Portable across the zsh/bash the
-// opencode tool shell uses (disown is a zsh/bash builtin, present on macOS/Linux/
-// WSL; not POSIX sh, hence the outer shell, not the inner `sh -c`, runs it).
+// The exit-code capture runs inside the shell command via a subshell so a bare
+// `exit N` in the user's command ends only the job, $? is captured immediately,
+// and the bare exit code is written LAST (after stdout/stderr files are closed),
+// so when the listener sees the exit file appear, .out/.err are already complete.
 function shSingleQuote(s: string): string {
   // Wrap s in single quotes, escaping embedded single quotes as '\''.
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-function wrapBackgrounded(command: string, sentinel: string): string {
-  // Inner script (runs detached under `sh -c`): run the user command in a
-  // SUBSHELL so a bare `exit N` ends only the job, capture $? immediately, and
-  // write the bare exit code to the sentinel. The sentinel path is single-quoted
-  // here for the inner sh.
-  const inner = `( ${command} ) >/dev/null 2>&1; echo "$?" > ${shSingleQuote(sentinel)}`
-  // Outer: detach the inner script via nohup + disown with all three fds severed
-  // from the tool's pipe. The inner script is single-quoted (one more layer of
-  // escaping) as the argument to `sh -c`.
-  return `nohup sh -c ${shSingleQuote(inner)} >/dev/null 2>&1 </dev/null & disown`
+// Per-job private file set, generated by perk under the project .perk/ dir. The
+// agent never names or sees these until the completion wake reports them. Using
+// the project dir (not /tmp) avoids opencode's external-directory permission
+// prompt that fires on any access outside the worktree.
+type JobFiles = { base: string; exit: string; out: string; err: string }
+
+function makeJobFiles(worktree: string, id: string): JobFiles {
+  const dir = join(worktree, ".perk")
+  mkdirSync(dir, { recursive: true })
+  const base = join(dir, `${id}-${randomBytes(3).toString("hex")}`)
+  return { base, exit: `${base}.exit`, out: `${base}.out`, err: `${base}.err` }
+}
+
+// Build the shell script the detached child runs. Run the user command in a
+// SUBSHELL (so a bare `exit N` ends only the job), redirect its stdout/stderr to
+// the capture files, then write the bare exit code to the exit file.
+//
+// NEWLINES, not semicolons, separate the parts. The user command can contain a
+// trailing `#` comment, and a `#` runs to end-of-LINE; if `( <command> )` were
+// one line, a comment would swallow the closing `)` and the redirect ("syntax
+// error: unexpected end of file"). Putting the command on its own line between
+// a lone `(` and `)` means any comment dies at the newline, and the closing
+// paren + capture survive. The user command may itself be multi-line.
+function backgroundScript(command: string, f: JobFiles): string {
+  return [
+    "(",
+    command,
+    `) >${shSingleQuote(f.out)} 2>${shSingleQuote(f.err)}`,
+    `echo "$?" > ${shSingleQuote(f.exit)}`,
+  ].join("\n")
+}
+
+// Spawn the detached job. Returns nothing; the listener (armed by the caller on
+// the exit file) is what reports completion. cwd resolves relative paths in the
+// user command.
+function spawnBackground(command: string, f: JobFiles, cwd: string): void {
+  const child = spawn("sh", ["-c", backgroundScript(command, f)], {
+    cwd,
+    detached: true,
+    stdio: "ignore",
+  })
+  child.unref()
 }
 
 export const Perk: Plugin = async ({ client }) => {
   const S = getState()
-  const jobByCall = S.jobByCall
 
   // Wire the live client into the shared injector. Every instance overwrites
   // with its own client; the most recently loaded (live) one wins.
@@ -268,111 +358,139 @@ export const Perk: Plugin = async ({ client }) => {
     // instances; we deliberately do NOT tear it down per-instance dispose.
     dispose: async () => {},
 
-    // --- bash augmentation: an optional `perk` arg turns any bash invocation
-    // into a fire-and-forget background job whose exit code lands in the named
-    // sentinel path. The path is caller-chosen so the completion file is a
-    // public rendezvous point other tools/agents/humans can also wait on.
-
-    // 1. Advertise the extra arg on the builtin bash tool's schema.
-    "tool.definition": async (
-      input: { toolID: string },
-      output: { description: string; parameters: any },
-    ) => {
-      if (input.toolID !== "bash") return
-      const p = output.parameters
-      // JSON Schema object: add an optional string property. Leave it out of
-      // `required` so existing calls are unaffected.
-      if (p && p.type === "object" && p.properties) {
-        p.properties.perk = {
-          type: "string",
-          description:
-            "Run this command as a fire-and-forget background job; wake the " +
-            "session when it finishes. The value is the sentinel path (you " +
-            "choose it on purpose so other observers can wait on the same file). " +
-            "Give a PLAIN command (e.g. 'sleep 20; exit 17'): just the work, no " +
-            "nohup/&/disown/redirection and no sentinel write of your own. perk " +
-            "supplies all of that for you. " +
-            "EXPECT YOUR HISTORY TO BE REWRITTEN: perk replaces your `command` " +
-            "with detach scaffolding (nohup/subshell/redirection + the exit-code " +
-            "write) BEFORE it runs, and that rewritten command is what gets " +
-            "recorded in the transcript. So when you look back you will see a " +
-            "command you did not type sitting in your own tool call. That is the " +
-            "plugin rewriting history, not a mistake of yours: do not 'correct' " +
-            "it or hand-roll the scaffolding to match. The tool returns " +
-            "immediately with a 'Backgrounded as perk_N' notice (text perk adds, " +
-            "NOT your command's output), and a listener wakes you on completion " +
-            "with the exit-code verdict. stdout/stderr are discarded, so log " +
-            "inside the command body if you need output. Pick a fresh, absolute " +
-            "path that does not yet exist (e.g. /tmp/job-7.done).",
-        }
-      }
-      output.description +=
-        "\n\nBackgrounding (`perk` arg): set `perk` to a fresh filesystem path " +
-        "to run the command as a detached fire-and-forget job and be woken (via " +
-        "perk) with its exit code when it finishes. The call returns immediately. " +
-        "Pass a plain command (just the work); perk supplies the detach " +
-        "scaffolding and the sentinel write. Note: perk rewrites your `command` " +
-        "into that scaffolding before it runs, and the REWRITTEN command is what " +
-        "appears in your transcript, so you will later see a command you did not " +
-        "type in your own tool call. That is expected; do not correct it. " +
-        "Without `perk`, the command runs verbatim as usual."
-    },
-
-    // 2. Rewrite the command + arm the listener, before the builtin runs.
-    "tool.execute.before": async (
-      input: { tool: string; sessionID: string; callID: string },
-      output: { args: any },
-    ) => {
-      if (input.tool !== "bash") return
-      try {
-        const a = output.args
-        const sentinel: unknown = a?.perk
-        if (typeof sentinel !== "string" || sentinel.length === 0) {
-          log("before: no perk arg", { callID: input.callID, hasArgs: !!a })
-          return
-        }
-        const original: string = a.command
-        const id = arm(S, sentinel, input.sessionID, { command: original })
-        jobByCall.set(input.callID, { id, sentinel })
-        a.command = wrapBackgrounded(original, sentinel)
-        delete a.perk // the builtin tool's schema validation must not see it
-        log("before: backgrounded", { callID: input.callID, id, sentinel })
-      } catch (e) {
-        // Never let an augmentation failure crash the tool pipeline. Log loudly;
-        // the call will fall through to a normal (un-backgrounded) bash run.
-        log("before: ERROR", { callID: input.callID, error: String(e) })
-      }
-    },
-
-    // 3. Rewrite the (now near-instant, empty) return into a useful notice.
-    "tool.execute.after": async (
-      input: { tool: string; sessionID: string; callID: string; args: any },
-      output: { title: string; output: string; metadata: any },
-    ) => {
-      if (input.tool !== "bash") return
-      try {
-        const job = jobByCall.get(input.callID)
-        if (!job) {
-          log("after: no job for callID", { callID: input.callID })
-          return
-        }
-        jobByCall.delete(input.callID)
-        output.output =
-          `[perk] Backgrounded as ${job.id}. The command shown in this tool ` +
-          `call is NOT what you typed: perk rewrote your command into detach ` +
-          `scaffolding before running it, and that rewritten form is what your ` +
-          `transcript now records. This is expected, not your doing; leave it ` +
-          `as-is. It is running detached now; its bare exit code will be written ` +
-          `to ${job.sentinel} on completion, and perk will wake you then with ` +
-          `the verdict. Stop here; do not poll. (perk_cancel ${job.id} to drop ` +
-          `the listener.)`
-        log("after: notice emitted", { callID: input.callID, id: job.id })
-      } catch (e) {
-        log("after: ERROR", { callID: input.callID, error: String(e) })
-      }
-    },
-
     tool: {
+      perk_bash_background: tool({
+        description:
+          "Run a shell command as a detached, fire-and-forget background job " +
+          "and get woken (via perk) when it finishes. This is NOT the builtin " +
+          "bash: that one blocks until the command exits and hands you its " +
+          "output; this one returns IMMEDIATELY (before the command finishes) " +
+          "and instead arms a one-shot perk listener that hands you a turn on " +
+          "completion with the exit-code verdict and the byte sizes + paths of " +
+          "the captured stdout/stderr (then auto-removes itself: a finished job " +
+          "needs no ack). Use it for long-running work you do not want to block " +
+          "on (builds, downloads, test suites, agent runs). Give just the " +
+          "command (e.g. 'make build' or 'sleep 20; exit 17'): you do NOT add " +
+          "nohup/&/disown/redirection, choose any output paths, or write any " +
+          "sentinel; perk handles detachment, captures stdout/stderr to files " +
+          "under the project .perk/ dir, and records the exit code itself. What " +
+          "lands in your transcript is exactly the command you typed. You get " +
+          "the output-file paths back so you can read them later if needed; if " +
+          "you want a PUBLIC rendezvous file for other observers, just write it " +
+          "yourself inside the command (e.g. '... && touch shared.done'). " +
+          "After calling: if a human is present (interactive session), end your " +
+          "turn and go idle; perk wakes you on completion. If NO human is " +
+          "present (you are running headless, e.g. via `opencode run`), do NOT " +
+          "end your turn, because that exits the process and the wake arrives " +
+          "into nothing: call perk_wait instead to block until the job finishes.",
+        args: {
+          command: tool.schema
+            .string()
+            .describe(
+              "The shell command to run in the background (just the work, e.g. " +
+                "'make build' or 'sleep 20; exit 17'). No nohup/&/disown/" +
+                "redirection and no output paths to choose; perk adds " +
+                "detachment and captures stdout/stderr to files for you. May be " +
+                "multi-line and may contain # comments.",
+            ),
+        },
+        async execute(args, ctx) {
+          const f = makeJobFiles(ctx.directory, `job_${S.nextId}`)
+          const id = arm(S, f.exit, ctx.sessionID, { out: f.out, err: f.err })
+          spawnBackground(args.command, f, ctx.directory)
+          log("perk_bash_background: spawned", {
+            id,
+            base: f.base,
+            cwd: ctx.directory,
+          })
+          return (
+            `Backgrounded as ${id} (running detached now). perk captures output ` +
+            `for you: stdout -> ${f.out}, stderr -> ${f.err}, exit code -> ` +
+            `${f.exit}. On completion perk wakes you with the exit code and the ` +
+            `byte sizes of those files; the listener auto-removes then (no ack ` +
+            `needed). If a human is present, end your turn now; do not poll. If ` +
+            `you are running headless (no human to wake you), call perk_wait ` +
+            `instead of ending your turn. (perk_cancel ${id} to drop the ` +
+            `listener before it fires.)`
+          )
+        },
+      }),
+
+      perk_wait: tool({
+        description:
+          "Block the current turn until a perk event fires or a timeout " +
+          "elapses, then return. This is the HEADLESS escape hatch: in a normal " +
+          "interactive session you should NOT use it, because ending your turn " +
+          "and going idle is strictly better (perk wakes you for free, with no " +
+          "blocked turn and no wasted spend). But when NO human is present (you " +
+          "are running via `opencode run` or similar), ending your turn exits " +
+          "the process, so the out-of-band wake would arrive into nothing. " +
+          "perk_wait keeps the turn alive so the wake can land. It returns a " +
+          "bare 'awoken' (it does NOT carry the event details): the real wake " +
+          "message, with the exit-code verdict or path transition, arrives as " +
+          "the very next turn, exactly as in an interactive session. So on " +
+          "return, just read the following turn. If there is nothing to wait for " +
+          "(no armed listeners), it returns immediately. Use after " +
+          "perk_bash_background (or perk_register) when running unattended.",
+        args: {
+          timeout_s: tool.schema
+            .number()
+            .optional()
+            .describe(
+              "Max seconds to block before giving up and returning 'timeout' " +
+                "(default 300). A timeout is not an error: it just means no " +
+                "watched path changed in time. Pick a value comfortably longer " +
+                "than the job you expect to finish.",
+            ),
+        },
+        async execute(args, _ctx) {
+          const timeoutS = args.timeout_s ?? 300
+          const anyArmed = () =>
+            [...S.listeners.values()].some((l) => l.armed)
+          log("perk_wait: entering", { timeoutS, anyArmed: anyArmed() })
+          const woken = await new Promise<boolean | "empty">((resolve) => {
+            let done = false
+            const settle = (v: boolean | "empty") => {
+              if (done) return
+              done = true
+              clearTimeout(t)
+              S.waiters.delete(waiter)
+              resolve(v)
+            }
+            const waiter = () => settle(true)
+            const t = setTimeout(() => settle(false), timeoutS * 1000)
+            if (typeof t.unref === "function") t.unref()
+            // Register the waiter BEFORE the armed-state check to close the
+            // check-then-wait race: if a listener fires between registering and
+            // checking, the poll loop will release this waiter. After
+            // registering, if nothing is armed, there is nothing to wait for
+            // (or everything already fired), so settle at once.
+            S.waiters.add(waiter)
+            if (!anyArmed()) settle("empty")
+          })
+          if (woken === "empty") {
+            log("perk_wait: nothing armed, returned immediately")
+            return (
+              "Nothing to wait for: no armed listeners. (Did the job already " +
+              "finish and fire, or did you forget to arm one?) Returning at once."
+            )
+          }
+          if (woken) {
+            log("perk_wait: awoken by event")
+            return (
+              "Awoken by a perk event. The wake message (with the verdict / " +
+              "transition) is the next turn; read it now and act on it."
+            )
+          }
+          log("perk_wait: timed out", { timeoutS })
+          return (
+            `Timed out after ${timeoutS}s with no perk event. None of the ` +
+            `watched paths changed in that window. You can perk_wait again, ` +
+            `check the sentinel directly, or give up.`
+          )
+        },
+      }),
+
       perk_register: tool({
         description:
           "Watch a filesystem path. The next time the path changes (appears, " +
@@ -382,7 +500,11 @@ export const Perk: Plugin = async ({ client }) => {
         args: {
           path: tool.schema
             .string()
-            .describe("Absolute path to watch (e.g. /tmp/job-42.done)."),
+            .describe(
+              "Path to watch (e.g. .perk/job.done or an absolute path). Prefer " +
+                "a path inside the project dir: opencode prompts for permission " +
+                "on any access outside the worktree.",
+            ),
         },
         async execute(args, ctx) {
           const id = arm(S, args.path, ctx.sessionID)

@@ -60,7 +60,7 @@ makes the model's attention deliberate.
 
 Drop [`.opencode/plugin/perk.ts`](.opencode/plugin/perk.ts) into your project's
 `.opencode/plugin/` directory. It is auto-discovered, no config entry needed.
-Boot opencode in that project and the three `perk_*` tools are available to the
+Boot opencode in that project and the `perk_*` tools are available to the
 model.
 
 ## Tool surface
@@ -70,6 +70,8 @@ model.
 | `perk_register({ path })` | Watch a path. The next change (appears, disappears, or contents change) hands you a turn saying so. Edge-triggered: fires once, then disarms. Returns an `id`. |
 | `perk_ack({ id })` | Re-arm a listener that has fired (takes a fresh baseline). |
 | `perk_cancel({ id })` | Stop watching: remove a listener. |
+| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block), captures stdout/stderr/exit-code to files under the project `.perk/` dir, and arms a one-shot listener; perk wakes you on completion with the exit code and the byte sizes + paths of the captured output, then auto-removes the listener (no ack). No paths to choose. |
+| `perk_wait({ timeout_s? })` | **Headless escape hatch.** Blocks the current turn until a perk event fires (or timeout), then returns a bare "awoken"; the actual wake message follows as the next turn. Use only when no human is present (e.g. `opencode run`), where ending a turn would exit the process before the wake could land. Interactively, just end your turn instead. |
 
 **Baseline semantics:** `perk_register` snapshots the path *now* and fires on
 the first observed change away from that baseline: a path appearing,
@@ -82,18 +84,87 @@ stop). The model decides what to do on waking.
 
 ## Example: a non-blocking background job
 
-The agent already has `bash`, and the shell already has `&`. A detached child
-needs no new launch primitive:
+The whole point of the afferent channel is to stop faking "wait for X" by
+blocking a turn. `perk_bash_background` is the ergonomic case: hand it a command
+and nothing else. It runs the command detached, returns immediately, captures
+stdout/stderr/exit-code to files for you, and arms a one-shot listener.
 
-```bash
-(opencode run "do the long thing; write results to /tmp/job-42.out" \
-  && touch /tmp/job-42.done) &
+```
+perk_bash_background({
+  command: "opencode run 'do the long thing'",
+})
 ```
 
-The parent backgrounds it, ends its turn, and `perk_register`s on
-`/tmp/job-42.done`. The harness's own CLI is the actuator, the shell `&` is the
-detachment, and perk supplies the only missing piece: the wakeup. No
-subagent-specific code anywhere.
+You end your turn and go idle; when the command exits, perk hands you a turn
+reporting the exit code and the byte sizes (and paths) of the captured output,
+so you can read the output files only if there is something worth reading. No
+polling, no blocked turn, no paths to invent, no hand-rolled backgrounding.
+
+Output and the exit code land under a project-local `.perk/` directory (kept in
+the project, not `/tmp`, so opencode does not prompt for out-of-worktree
+access). The listener auto-removes when it fires: a finished job needs no `ack`.
+
+If you want a **public rendezvous** file that other tools/agents/humans can wait
+on, just write it yourself inside the command; that is rare enough not to deserve
+a parameter:
+
+```
+perk_bash_background({ command: "make build && touch shared-build.done" })
+```
+
+The mechanism is deliberately not magic. The detachment (`detached` spawn) and
+the capture live *inside the tool*; the only new capability perk supplies over
+plain `bash` + `&` is the wakeup. If you prefer to background work yourself, you
+still can: any `touch`-on-completion plus a `perk_register` gives the same
+result.
+
+```bash
+(opencode run "do the long thing" && touch .perk/job-42.done) &
+```
+
+Then `perk_register` on `.perk/job-42.done`. The shell `&` is the detachment;
+perk is just the sense organ that notices the file appear.
+
+> **Why a dedicated tool and not a flag on `bash`?** An earlier design hooked the
+> builtin `bash` and silently rewrote the agent's `command` into detach
+> scaffolding before running it. Since the transcript is the agent's only memory,
+> the agent would later read scaffolding it never typed and conclude it had erred
+> (see issue #2). A separate tool records exactly what the agent typed; the
+> scaffolding stays inside the implementation where it belongs.
+
+## Interactive vs. headless: a turn that ends is not always a turn that idles
+
+perk's wake works by *injecting a turn into a live session*. That assumes the
+session is still running after the agent stops. In the **interactive** TUI that
+holds: ending a turn means going idle, the process keeps running, and the human
+typing or perk's injection both produce the next turn. Ending the turn is
+strictly the right move: no blocking, no wasted spend, woken for free.
+
+In a **headless** run (`opencode run`), ending a turn means the **process
+exits**. There is no idle state to wake; the injected turn would arrive into
+nothing. So an agent that "ends its turn to wait," a reflex that is correct
+interactively, silently breaks the round-trip exactly where fire-and-forget
+matters most.
+
+`perk_wait` is the escape hatch for that case. It is a *blocking* tool call:
+it parks the current turn until a perk event fires (or a timeout), keeping the
+process alive so the wake can land. It returns a bare "awoken"; the real wake
+message arrives as the very next turn, identical to interactive mode (one wake
+path, both modes). The rule the tools advise:
+
+- **Human present (interactive):** end your turn. Do not call `perk_wait`.
+- **No human (headless / unattended):** call `perk_wait` instead of ending your
+  turn.
+
+This deliberately reintroduces a blocking wait, the very thing perk's thesis
+dissolves, but only where the thesis does not apply: with no live host, there is
+no conversation to interrupt, and blocking is the only way not to exit. The two
+modes genuinely want opposite mechanisms.
+
+> **Caveat (poka-yoke gap):** the plugin cannot currently tell from its inputs
+> whether it is interactive or headless, so it cannot enforce this; it can only
+> advise via the tool descriptions. Closing that gap (detecting run mode and
+> hard-steering the agent) is open work.
 
 ## Scope
 

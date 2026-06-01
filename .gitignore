@@ -1,1 +1,4 @@
 .opencode/node_modules/
+
+# perk_bash_background scratch: per-job stdout/stderr/exit-code capture files.
+.perk/

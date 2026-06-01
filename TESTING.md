@@ -9,8 +9,8 @@ perk has two surfaces, tested in turn below:
 
 1. **The afferent channel** (`perk_register` / `perk_ack` / `perk_cancel`): watch
    a path, get a turn when it changes.
-2. **The `bash` `perk` arg**: run a command as a fire-and-forget background job
-   and be woken with its exit code.
+2. **`perk_bash_background`**: run a command as a fire-and-forget background job
+   and be woken with its exit code and captured-output sizes.
 
 ## How to read this guide
 
@@ -23,12 +23,16 @@ as their own descriptions tell you to, and report anything that surprised you.
 
 ## Rig setup (facts about the test, not about the tools)
 
-- Be in a **fresh opencode session**. Plugin-augmented tool schemas only reach
-  the model when the tool list is built; a stale session may not offer the `perk`
-  arg. If a tool seems inert in a confirmed-fresh session, check `/tmp/perk.log`
-  for load errors before calling it a test failure.
-- Use `/tmp` for all paths. Pick fresh paths that do not already exist; clean up
-  at the end.
+- Be in a **fresh opencode session**. Plugin tools only reach the model when the
+  tool list is built; a stale session predating the plugin load may not offer the
+  `perk_*` tools. If a tool seems inert in a confirmed-fresh session, check
+  `/tmp/perk.log` for load errors before calling it a test failure.
+- Use paths inside the project `.perk/` dir (e.g. `.perk/perk-test-1`). Avoid
+  `/tmp` and other out-of-worktree paths: opencode prompts for permission on any
+  access outside the project, which interrupts the unattended round-trip. Pick
+  fresh paths that do not already exist; clean up at the end. (`.perk/` also holds
+  the files `perk_bash_background` auto-generates.) Run `mkdir -p .perk` once
+  before Part 1 so the scheduled `touch` triggers have a directory to write into.
 - **A scheduled change must outlast one of your turns.** Per-turn latency (model
   thinking + tool round-trips) can be ~10s, and you arm on the turn *after* you
   schedule. Use **`sleep 20`** as the canonical delay: above `POLL_MS`, longer
@@ -41,11 +45,23 @@ as their own descriptions tell you to, and report anything that surprised you.
   TUI). `tail -f /tmp/perk.log` in another shell to watch `fired` events.
   `PERK_LOG=off` silences.
 
-> **Scheduling a delayed trigger:** use the `bash` `perk` arg for it (e.g. a
-> `sleep 20` job that writes a path). That is the documented way to run a job that
-> outlives the call; you do not need to hand-roll backgrounding. When a test
-> watches path X, have the trigger touch X via a job whose *own* sentinel is a
-> *different* path, so the wake you are testing for is the one you mean to test.
+> **Scheduling a delayed trigger:** for Part 1, schedule the delayed change with
+> a **plain detached shell job via the builtin `bash` tool** that arms *no* perk
+> listener, e.g.:
+> ```bash
+> (sleep 20; touch .perk/perk-test-1) >/dev/null 2>&1 &
+> ```
+> Do **not** use `perk_bash_background` as the trigger here. `perk_bash_background`
+> arms its own one-shot listener on its sentinel and therefore emits its *own*
+> completion wake. In Part 1 you are testing a *specific* listener; a second wake
+> from the trigger job would be noise in the positive tests and a false-FAIL trap
+> in the negative tests (2 and 5), whose pass criterion is *silence*. A plain
+> backgrounded shell job is a silent side channel: it changes the file and reports
+> nothing, so the only wake that can arrive is the one under test.
+>
+> (The `&`-backgrounded job returns the shell immediately, so the `bash` call does
+> not block for the `sleep`. You then arm your listener and end your turn.)
+> `perk_bash_background` gets its own dedicated coverage in Part 2.
 
 ---
 
@@ -55,10 +71,10 @@ as their own descriptions tell you to, and report anything that surprised you.
 
 The one that matters. Everything else is refinement.
 
-1. `rm -f /tmp/perk-test-1` (known state).
-2. `perk_register` the path `/tmp/perk-test-1`.
-3. Schedule a delayed `touch /tmp/perk-test-1` that outlives your turn (see the
-   scheduling note; use the `perk` arg, with its own separate sentinel).
+1. `rm -f .perk/perk-test-1` (known state).
+2. `perk_register` the path `.perk/perk-test-1`.
+3. Schedule a delayed `touch .perk/perk-test-1` that outlives your turn (see the
+   scheduling note: plain detached `bash` job, no perk listener).
 4. **End your turn.** Say one short sentence ("Armed test 1; waiting.") and stop.
    Do not poll, loop, or call more tools. Going idle is the point.
 
@@ -68,12 +84,16 @@ path appeared. **Fail:** no turn ever arrives.
 ## Test 2: edge-trigger discipline (no re-fire without ack)
 
 After Test 1 wakes you, change the file again **without acking**
-(`echo more >> /tmp/perk-test-1`), then end your turn.
+(`echo more >> .perk/perk-test-1`), then end your turn.
 
 **Pass:** **no** wake arrives; the disarmed listener ignored the change. (You sit
 idle until a human speaks; that silence is success.)
 **For the human:** after the agent goes idle, wait a couple of seconds, then send
 any short message. No autonomous wake before your message is the proof.
+**Note:** because the trigger is a plain `bash` job (no perk listener), nothing
+but the listener-under-test can wake you, so the silence is clean. Do not use
+`perk_bash_background` to schedule the change here, or its completion wake will
+falsely break this test.
 
 ## Test 3: re-arming with ack
 
@@ -85,28 +105,31 @@ any short message. No autonomous wake before your message is the proof.
 
 ## Test 4: delete is detected too
 
-`touch /tmp/perk-test-del` (exists at arm time), `perk_register` it, schedule a
-delayed `rm -f /tmp/perk-test-del`, end your turn.
+`touch .perk/perk-test-del` (exists at arm time), `perk_register` it, schedule a
+delayed `rm -f .perk/perk-test-del`, end your turn.
 
 **Pass:** you are woken reporting the path disappeared.
 
 ## Test 5: cancel
 
-`perk_register` `/tmp/perk-test-cancel` (ensure it does not exist), immediately
-`perk_cancel` that listener, then schedule its delayed trigger and end your turn.
+`perk_register` `.perk/perk-test-cancel` (ensure it does not exist), immediately
+`perk_cancel` that listener, then schedule its delayed trigger (plain `bash` job,
+no perk listener) and end your turn.
 
 **Pass:** **no** wake arrives. **For the human:** after the agent goes idle, wait
 ~25s (so the trigger fires), then send any short message. The silence proves
 cancel removed the listener.
+**Note:** as in Test 2, the trigger must be a plain backgrounded `bash` job. If
+you schedule it with `perk_bash_background`, that job's own completion wake will
+arrive and you will misread it as a FAIL.
 
 ---
 
-# Part 2: the `bash` `perk` arg
+# Part 2: `perk_bash_background`
 
 ## Test A: round-trip
 
-1. Use the `perk` arg in `bash` to run `sleep 20; true`, sentinel
-   `/tmp/job-a.done`.
+1. Call `perk_bash_background` with `command` = `sleep 20; true` (no other args).
 2. **End your turn.** One short sentence, then stop. Do not poll.
 
 **Pass:** the call returns effectively instantly (it does not block for the
@@ -115,29 +138,50 @@ halves must hold.
 
 ## Test B: nonzero exit
 
-Use the `perk` arg in `bash` to run `sleep 20; exit 17`, sentinel
-`/tmp/job-b.done`. End your turn.
+Call `perk_bash_background` with `command` = `sleep 20; exit 17`. End your turn.
 
 **Pass:** you are woken on your own, and the wake reports exit code 17.
 
-## Test C: plays well with others
+## Test C: captured output
 
-1. Use the `perk` arg in `bash` to run `sleep 20`, sentinel `/tmp/job-c.done`.
-2. In a **separate, plain (no `perk`)** `bash` call, block on that same path and
-   read it:
-   `while [ ! -e /tmp/job-c.done ]; do sleep 1; done; echo "code=$(cat /tmp/job-c.done)"`
+Call `perk_bash_background` with a command that writes to both streams and exits
+nonzero, e.g.:
+```
+echo hello on stdout
+echo uh oh on stderr 1>&2
+sleep 20
+exit 3
+```
+End your turn.
 
-**Pass:** the second call eventually returns `code=0`. (A perk wake for the same
-path may also arrive; both observers are valid.)
+**Pass:** the wake reports exit code 3 **and** nonzero byte sizes for both
+stdout and stderr, with their `.perk/` paths. Reading the named files shows the
+two lines. (The tool chose and reported the paths; you did not pass any.)
+
+## Test D: explicit rendezvous (optional)
+
+There is no `sentinel` argument: perk auto-generates its own private files. If
+you want a public rendezvous file another observer can wait on, you write it
+yourself in the command body. Call `perk_bash_background` with
+`command` = `sleep 20; touch .perk/rendezvous-d.done`, and in a **separate, plain
+`bash`** call block on that file:
+`while [ ! -e .perk/rendezvous-d.done ]; do sleep 1; done; echo seen`
+
+**Pass:** the second call eventually prints `seen`. (A perk wake for the job's
+own completion also arrives; both observers are valid.)
 
 ---
 
 ## Cleanup
 
 ```bash
-rm -f /tmp/perk-test-1 /tmp/perk-test-del /tmp/perk-test-cancel \
-      /tmp/job-a.done /tmp/job-b.done /tmp/job-c.done
+rm -f .perk/perk-test-1 .perk/perk-test-del .perk/perk-test-cancel \
+      .perk/rendezvous-d.done
 ```
+
+`perk_bash_background` also leaves per-job `.perk/job_*.{out,err,exit}` capture
+files; remove them too (`rm -f .perk/job_*`) or just `rm -rf .perk` once no
+listeners are armed. The whole `.perk/` dir is gitignored.
 
 Cancel any listeners still armed with `perk_cancel`.
 
@@ -158,8 +202,11 @@ same-stat overwrite as a bug.
   primary signal: the protocol withholds the mechanism on purpose.)
 - Was the wake verdict (appeared / changed / disappeared; clean / exit code N)
   unambiguous?
-- Anything about the `perk` arg (the value being the sentinel path, the rewritten
-  command appearing in your transcript, the immediate return) that read wrong?
+- Anything about `perk_bash_background` (its single `command` arg with no paths
+  to choose; the command recorded verbatim in your own tool call, *not* echoed
+  back in the wake; stdout/stderr/exit captured to `.perk/` files reported by
+  size + path; the listener auto-removing on completion so no ack is needed; the
+  immediate return) that read wrong?
 - Any confusion about the fresh-session requirement?
 
 ## What a full pass demonstrates
@@ -168,5 +215,7 @@ same-stat overwrite as a bug.
 - Deliberate attention via edge-trigger + ack (Tests 2, 3).
 - Best-effort detection of appearance, change, disappearance (Tests 1, 3, 4).
 - Clean teardown (Test 5).
-- Fire-and-forget jobs that return immediately and report their exit code on their
-  own (Tests A, B), over a sentinel that doubles as public rendezvous (Test C).
+- Fire-and-forget jobs that return immediately, capture their output, and report
+  exit code + output sizes on their own (Tests A, B, C), with public rendezvous
+  available by writing it yourself in the command body when rarely needed (Test
+  D).
