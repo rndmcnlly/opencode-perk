@@ -2,11 +2,11 @@
 
 This guide is written **for an agent** running in an opencode session where
 `.opencode/plugin/perk.ts` is loaded. You exercise the plugin on yourself: fire
-background jobs with `perk_bash_background`, block on rendezvous files with your
+background jobs with `bash_background`, block on rendezvous files with your
 own `bash`, and observe yourself getting woken. No external harness, no HTTP.
 Your conversation *is* the test rig.
 
-perk is **one tool**: `perk_bash_background`. It has two behaviors to verify:
+perk is **one tool**: `bash_background`. It has two behaviors to verify:
 
 1. **The afferent channel:** fire a job, end your turn, get woken on completion
    with the exit code and captured-output sizes (interactive).
@@ -25,9 +25,9 @@ is itself a finding to report, not a gap for this file to paper over.
 
 - Be in a **fresh opencode session**. Plugin tools only reach the model when the
   tool list is built; a stale session predating the plugin load may not offer
-  `perk_bash_background`. If the tool seems inert in a confirmed-fresh session,
+  `bash_background`. If the tool seems inert in a confirmed-fresh session,
   check `/tmp/perk.log` for load errors before calling it a test failure.
-- `perk_bash_background` auto-generates its capture files under the project
+- `bash_background` auto-generates its capture files under the project
   `.perk/` dir; you never choose paths. For any *public* rendezvous file you
   create yourself, also use `.perk/` (e.g. `.perk/rendezvous-x.done`) to stay
   inside the worktree and avoid opencode's out-of-worktree permission prompt.
@@ -46,7 +46,7 @@ is itself a finding to report, not a gap for this file to paper over.
 
 The one that matters. Everything else is refinement.
 
-1. Call `perk_bash_background` with `command` = `sleep 20; true` (no other args).
+1. Call `bash_background` with `command` = `sleep 20; true` (no other args).
 2. **End your turn.** Say one short sentence ("Fired test 1; waiting.") and stop.
    Do not poll, loop, or call more tools. Going idle is the point.
 
@@ -57,13 +57,13 @@ arrives.
 
 ## Test 2: nonzero exit
 
-Call `perk_bash_background` with `command` = `sleep 20; exit 17`. End your turn.
+Call `bash_background` with `command` = `sleep 20; exit 17`. End your turn.
 
 **Pass:** you are woken on your own, and the wake reports exit code 17.
 
 ## Test 3: captured output
 
-Call `perk_bash_background` with a command that writes to both streams and exits
+Call `bash_background` with a command that writes to both streams and exits
 nonzero, e.g.:
 ```
 echo hello on stdout
@@ -86,7 +86,7 @@ injected wake, because ending your turn would exit the process.
 
 ## Test 4: block on the exit file
 
-1. Call `perk_bash_background` with `command` = `sleep 20; echo done-4`. Note the
+1. Call `bash_background` with `command` = `sleep 20; echo done-4`. Note the
    **exit-file path** it returns.
 2. In a **separate, foreground `bash`** call, block on that path exactly as the
    tool advises:
@@ -101,7 +101,7 @@ for the same job may also arrive; both observers are valid.)
 
 ## Test 5: kill via pgid
 
-1. Call `perk_bash_background` with `command` = `sleep 120`. Note the **pgid** it
+1. Call `bash_background` with `command` = `sleep 120`. Note the **pgid** it
    returns.
 2. In a `bash` call, kill the whole group: `kill -TERM -<pgid>` (leading minus).
 3. Verify it is gone: `ps -eo pid,command | grep "[s]leep 120" || echo REAPED`.
@@ -114,7 +114,7 @@ whole job tree.
 
 There is no rendezvous argument: perk auto-generates its own private files. If
 you want a *public* file another observer can wait on, write it yourself in the
-command body. Call `perk_bash_background` with
+command body. Call `bash_background` with
 `command` = `sleep 20; touch .perk/rendezvous-6.done`, and in a **separate,
 foreground `bash`** call block on it:
 ```bash
@@ -147,7 +147,7 @@ finish via `kill -TERM -<pgid>`.
 - Was the interactive-vs-headless guidance (end your turn vs. foreground
   until-loop) clear from the tool's return value alone?
 - Did the pgid kill handle work as described (the leading-minus group form)?
-- Anything about `perk_bash_background` (its single `command` arg with no paths
+- Anything about `bash_background` (its single `command` arg with no paths
   to choose; the command recorded verbatim in your own tool call, *not* echoed
   back in the wake; capture reported by size + path; the immediate return; the
   pgid) that read wrong?

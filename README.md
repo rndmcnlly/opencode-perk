@@ -39,7 +39,7 @@ perk is a single tool.
 
 | Tool | What it does |
 | --- | --- |
-| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
+| `bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
 
 That's the whole surface.
 
@@ -64,16 +64,16 @@ be using perk.
 
 Drop [`.opencode/plugin/perk.ts`](.opencode/plugin/perk.ts) into your project's
 `.opencode/plugin/` directory. It is auto-discovered, no config entry needed.
-Boot opencode in that project and `perk_bash_background` is available to the
+Boot opencode in that project and `bash_background` is available to the
 model.
 
 ## Example: a non-blocking background job
 
 The whole point of the afferent channel is to stop faking "wait for X" by
-blocking a turn. Hand `perk_bash_background` a command and nothing else:
+blocking a turn. Hand `bash_background` a command and nothing else:
 
 ```
-perk_bash_background({ command: "make build" })
+bash_background({ command: "make build" })
 ```
 
 It runs the command detached, returns immediately, and captures
@@ -94,7 +94,7 @@ that blocks until X happens, then exits. Anything you can express as a shell
 condition becomes something perk can wake you on:
 
 ```
-perk_bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
+bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
 ```
 
 The poll loop lives inside the command, so perk needs exactly one sense organ (a
@@ -103,7 +103,7 @@ opening, a lock releasing, a sub-process settling.
 
 ## Killing a job, and "die with opencode"
 
-`perk_bash_background` returns the job's **process-group id** (`pgid`). Because
+`bash_background` returns the job's **process-group id** (`pgid`). Because
 the job is spawned `detached` it is its own process-group leader, so a single
 signal to the negated pgid reaps the whole tree (the wrapper, the command, and
 anything the command spawned):
@@ -113,12 +113,12 @@ kill -TERM -<pgid>      # leading minus = signal the whole process group
 ```
 
 This matters for long-lived jobs like preview/dev servers
-(`perk_bash_background({ command: "npm run dev" })`): the agent gets a kill
+(`bash_background({ command: "npm run dev" })`): the agent gets a kill
 handle instead of an unstoppable orphan.
 
 Jobs also **die with opencode on a graceful shutdown.** The plugin tracks every
 running job and group-kills the survivors in its `dispose` hook, which opencode
-calls on teardown (verified: a `sleep 90` fired via `perk_bash_background` is
+calls on teardown (verified: a `sleep 90` fired via `bash_background` is
 reaped when `opencode run` exits). The one case this cannot cover is a hard
 crash or `kill -9` of opencode itself (uncatchable); the returned pgid is the
 manual remedy there.
@@ -179,7 +179,7 @@ cleanly: a delegation plugin could use perk as its wake mechanism, or perk can
 wrap a sub-agent run directly:
 
 ```
-perk_bash_background({ command: "opencode run 'do the long research thing'" })
+bash_background({ command: "opencode run 'do the long research thing'" })
 ```
 
 If a harness grows native background tasks or event systems, perk consumes or
@@ -197,7 +197,7 @@ just the cheapest universal one.
 
 [`TESTING.md`](./TESTING.md) is a self-test written *for a perk-enabled agent*:
 it walks the model through firing background jobs with its own
-`perk_bash_background`, blocking on the rendezvous file, and observing itself
+`bash_background`, blocking on the rendezvous file, and observing itself
 getting woken. Point your agent at it to confirm the primitive end to end (and
 to feel the round-trip from the inside).
 

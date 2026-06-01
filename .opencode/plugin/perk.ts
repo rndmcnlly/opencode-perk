@@ -1,7 +1,7 @@
 /**
  * perk: a minimal afferent channel for a harnessed model.
  *
- * One primitive: perk_bash_background. The model fires a shell command as a
+ * One primitive: bash_background. The model fires a shell command as a
  * detached background job and regains control of its turn IMMEDIATELY. When the
  * job finishes, perk injects a conversational turn into the (idle) session
  * reporting the exit code and the byte sizes of the captured stdout/stderr.
@@ -252,7 +252,7 @@ export const Perk: Plugin = async ({ client }) => {
     },
 
     tool: {
-      perk_bash_background: tool({
+      bash_background: tool({
         description:
           "Run a shell command as a detached, fire-and-forget background job " +
           "and get woken (via perk) when it finishes. This is NOT the builtin " +
@@ -302,7 +302,7 @@ export const Perk: Plugin = async ({ client }) => {
             pgid,
           })
           S.jobs.add(pgid)
-          log("perk_bash_background: spawned", {
+          log("bash_background: spawned", {
             pgid,
             base: f.base,
             cwd: ctx.directory,
