@@ -39,13 +39,9 @@ perk is a single tool.
 
 | Tool | What it does |
 | --- | --- |
-| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pgid` and the paths to its captured stdout / stderr / exit-code files (under the project `.perk/` dir). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
+| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
 
-That's the whole surface. Earlier versions also had `perk_register` /
-`perk_ack` / `perk_cancel` (watch an arbitrary path, re-arm, stop) and
-`perk_wait` (a headless blocking escape hatch). All four are gone, because each
-reduces to the single primitive (see ["What the four retired tools
-reduce to"](#what-the-four-retired-tools-reduce-to)).
+That's the whole surface.
 
 ## How it works (the pattern)
 
@@ -59,7 +55,7 @@ Two ingredients, both of which most harnesses already have:
    truly done, so its appearance is a sound completion signal.
 
 When a job's exit file appears, perk injects a turn into the firing session
-describing the outcome (exit code, captured-output sizes and paths). The wake
+describing the outcome (exit code, captured-output byte sizes). The wake
 text is generated, not canned. perk does not try to avoid landing a turn
 mid-flight; an agent that cannot tolerate an interleaved notification should not
 be using perk.
@@ -83,13 +79,27 @@ perk_bash_background({ command: "make build" })
 It runs the command detached, returns immediately, and captures
 stdout/stderr/exit-code to files for you. You end your turn and go idle; when the
 build exits, perk hands you a turn reporting the exit code and the byte sizes
-(and paths) of the captured output, so you read the output files only if there
+of the captured output, so you read the output files only if there
 is something worth reading. No polling, no blocked turn, no paths to invent, no
 hand-rolled backgrounding.
 
 Output and the exit code land under a project-local `.perk/` directory (kept in
 the project, not `/tmp`, so opencode does not prompt for out-of-worktree
 access).
+
+## Example: wait on any observable
+
+Because the job is an arbitrary shell command, "wait for X" is just a command
+that blocks until X happens, then exits. Anything you can express as a shell
+condition becomes something perk can wake you on:
+
+```
+perk_bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
+```
+
+The poll loop lives inside the command, so perk needs exactly one sense organ (a
+job's exit-code file) yet covers any waitable condition: a file appearing, a port
+opening, a lock releasing, a sub-process settling.
 
 ## Killing a job, and "die with opencode"
 
@@ -137,42 +147,10 @@ session is still running after the agent stops.
   first, then the exit code is written atomically), so the loop is a correct
   completion gate. When it returns, read the captured output.
 
-This is the same insight that retired `perk_wait`: the headless wait is just a
-bash poll on the rendezvous file perk already gives you.
-
 > **Caveat (poka-yoke gap):** the plugin cannot currently tell from its inputs
 > whether it is interactive or headless, so it cannot enforce this; it can only
 > advise via the tool description. Closing that gap (detecting run mode and
 > hard-steering the agent) is open work.
-
-## What the four retired tools reduce to
-
-The single-primitive claim rests on these reductions:
-
-- **`perk_register({ path })`** ("watch an arbitrary observable") becomes a job
-  that blocks until the observable changes, then exits:
-
-  ```
-  perk_bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
-  ```
-
-  The poll loop that used to live inside the plugin now lives inside the
-  command. perk keeps exactly one sense organ (a job's exit-code file) instead
-  of two (that file plus a generic stat-poll over registered paths). Anything
-  that can be expressed as "wait for a shell condition" is now in scope, which
-  is *more* general than the old fixed appear/disappear/mtime triggers.
-
-- **`perk_ack({ id })`** was just "re-register." A fresh `perk_bash_background`
-  per event covers it.
-
-- **`perk_cancel({ id })`** was barely better than neglecting to ack. Job
-  listeners now auto-remove on completion; to stop a *running* job, kill it via
-  its pgid.
-
-- **`perk_wait({ timeout_s })`** was the headless blocking escape hatch. It is
-  replaced by the foreground `until [ -e <exit-file> ]; do sleep 0.3; done`
-  shown above: the same blocking wait, in bash, on the file perk already
-  returns.
 
 ## Why a dedicated tool and not a flag on `bash`
 
