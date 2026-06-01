@@ -5,15 +5,15 @@
 > **Proof of concept.** This repo demonstrates a general pattern: giving an
 > agent a controllable way to *speak out of turn*, woken by the world rather
 > than only by a human typing. The reference implementation is a single-file
-> plugin for [opencode](https://opencode.ai), verified against **1.15.12**. The
+> plugin for [opencode](https://opencode.ai), verified against **1.15.13**. The
 > pattern is not specific to opencode. If you maintain a different agent
 > harness, steal it.
 
 ## The idea in one sentence
 
-`perk` lets a model register interest in an external observable and get handed a
-conversational turn when that observable changes, so the model can react to the
-world instead of only responding to the human.
+`perk` lets a model fire off a background job and get handed a conversational
+turn when that job finishes, so the model can react to the world instead of
+only responding to the human.
 
 ## The gap it fills
 
@@ -23,157 +23,190 @@ turn is a person typing. The model cannot wait on anything, cannot be woken,
 cannot speak out of turn. Every "wait for X" is faked by burning a turn on a
 blocking call, which freezes the conversation (and the spend) until X resolves.
 
-`perk` adds the missing afferent channel. The model registers a listener ("tell
-me when this file changes"), ends its turn normally, and goes idle. Later, when
-the observable changes, the harness injects a turn as if the world had spoken.
-The human and the world become peers: either can produce the next turn.
+`perk` adds the missing afferent channel. The model fires a background job, ends
+its turn normally, and goes idle. Later, when the job finishes, the harness
+injects a turn as if the world had spoken. The human and the world become peers:
+either can produce the next turn.
 
 The key realization: **there is no blocking wait to interrupt.**
 "User-interruptible waiting" dissolves into "two turn-producers feeding one
-serialized conversation." The human typing and the world changing arrive through
-the same door.
+serialized conversation." The human typing and the world finishing a job arrive
+through the same door.
+
+## One primitive
+
+perk is a single tool.
+
+| Tool | What it does |
+| --- | --- |
+| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pgid` and the paths to its captured stdout / stderr / exit-code files (under the project `.perk/` dir). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
+
+That's the whole surface. Earlier versions also had `perk_register` /
+`perk_ack` / `perk_cancel` (watch an arbitrary path, re-arm, stop) and
+`perk_wait` (a headless blocking escape hatch). All four are gone, because each
+reduces to the single primitive (see ["What the four retired tools
+reduce to"](#what-the-four-retired-tools-reduce-to)).
 
 ## How it works (the pattern)
 
-Two primitives, both of which most harnesses already have:
+Two ingredients, both of which most harnesses already have:
 
 1. **A way to inject a turn into a session** out of band (here:
    opencode's fire-and-forget `client.session.promptAsync`).
 2. **A sense organ** that watches the observable. perk uses a **stat-poll loop**
-   over registered filesystem paths: presence, mtime, and size. The filesystem
-   is the substrate, so anything that can `touch` a file becomes an event source
-   (a timer is `sleep N && touch`; a job is `... && touch done`; a webhook
-   receiver writes a file).
+   over the one thing it needs to watch: each running job's *exit-code file*.
+   The job's wrapper writes that file last, atomically, only when the job is
+   truly done, so its appearance is a sound completion signal.
 
-When a watched path changes, perk injects a turn into the registering session
-**the instant it sees the change**, describing what happened. No queue, no idle
-gate, no canned message: the wake text is generated from the listener id, the
-path, and the observed transition. perk does not try to avoid landing a turn
+When a job's exit file appears, perk injects a turn into the firing session
+describing the outcome (exit code, captured-output sizes and paths). The wake
+text is generated, not canned. perk does not try to avoid landing a turn
 mid-flight; an agent that cannot tolerate an interleaved notification should not
 be using perk.
-
-It is **edge-triggered**: a listener fires once, then disarms. The model must
-`ack` to re-arm. This keeps a flapping file from spamming the conversation and
-makes the model's attention deliberate.
 
 ## Install (opencode)
 
 Drop [`.opencode/plugin/perk.ts`](.opencode/plugin/perk.ts) into your project's
 `.opencode/plugin/` directory. It is auto-discovered, no config entry needed.
-Boot opencode in that project and the `perk_*` tools are available to the
+Boot opencode in that project and `perk_bash_background` is available to the
 model.
-
-## Tool surface
-
-| Tool | What it does |
-| --- | --- |
-| `perk_register({ path })` | Watch a path. The next change (appears, disappears, or contents change) hands you a turn saying so. Edge-triggered: fires once, then disarms. Returns an `id`. |
-| `perk_ack({ id })` | Re-arm a listener that has fired (takes a fresh baseline). |
-| `perk_cancel({ id })` | Stop watching: remove a listener. |
-| `perk_bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block), captures stdout/stderr/exit-code to files under the project `.perk/` dir, and arms a one-shot listener; perk wakes you on completion with the exit code and the byte sizes + paths of the captured output, then auto-removes the listener (no ack). No paths to choose. |
-| `perk_wait({ timeout_s? })` | **Headless escape hatch.** Blocks the current turn until a perk event fires (or timeout), then returns a bare "awoken"; the actual wake message follows as the next turn. Use only when no human is present (e.g. `opencode run`), where ending a turn would exit the process before the wake could land. Interactively, just end your turn instead. |
-
-**Baseline semantics:** `perk_register` snapshots the path *now* and fires on
-the first observed change away from that baseline: a path appearing,
-disappearing, or its mtime/size changing. There is no need to declare which kind
-of change you expect; perk reports what it saw and you decide what it means.
-
-The injected turn names the listener id, the path, and the observed transition,
-plus a reminder that the listener is now disarmed (ack to re-arm, cancel to
-stop). The model decides what to do on waking.
 
 ## Example: a non-blocking background job
 
 The whole point of the afferent channel is to stop faking "wait for X" by
-blocking a turn. `perk_bash_background` is the ergonomic case: hand it a command
-and nothing else. It runs the command detached, returns immediately, captures
-stdout/stderr/exit-code to files for you, and arms a one-shot listener.
+blocking a turn. Hand `perk_bash_background` a command and nothing else:
 
 ```
-perk_bash_background({
-  command: "opencode run 'do the long thing'",
-})
+perk_bash_background({ command: "make build" })
 ```
 
-You end your turn and go idle; when the command exits, perk hands you a turn
-reporting the exit code and the byte sizes (and paths) of the captured output,
-so you can read the output files only if there is something worth reading. No
-polling, no blocked turn, no paths to invent, no hand-rolled backgrounding.
+It runs the command detached, returns immediately, and captures
+stdout/stderr/exit-code to files for you. You end your turn and go idle; when the
+build exits, perk hands you a turn reporting the exit code and the byte sizes
+(and paths) of the captured output, so you read the output files only if there
+is something worth reading. No polling, no blocked turn, no paths to invent, no
+hand-rolled backgrounding.
 
 Output and the exit code land under a project-local `.perk/` directory (kept in
 the project, not `/tmp`, so opencode does not prompt for out-of-worktree
-access). The listener auto-removes when it fires: a finished job needs no `ack`.
+access).
 
-If you want a **public rendezvous** file that other tools/agents/humans can wait
-on, just write it yourself inside the command; that is rare enough not to deserve
-a parameter:
+## Killing a job, and "die with opencode"
 
-```
-perk_bash_background({ command: "make build && touch shared-build.done" })
-```
-
-The mechanism is deliberately not magic. The detachment (`detached` spawn) and
-the capture live *inside the tool*; the only new capability perk supplies over
-plain `bash` + `&` is the wakeup. If you prefer to background work yourself, you
-still can: any `touch`-on-completion plus a `perk_register` gives the same
-result.
+`perk_bash_background` returns the job's **process-group id** (`pgid`). Because
+the job is spawned `detached` it is its own process-group leader, so a single
+signal to the negated pgid reaps the whole tree (the wrapper, the command, and
+anything the command spawned):
 
 ```bash
-(opencode run "do the long thing" && touch .perk/job-42.done) &
+kill -TERM -<pgid>      # leading minus = signal the whole process group
 ```
 
-Then `perk_register` on `.perk/job-42.done`. The shell `&` is the detachment;
-perk is just the sense organ that notices the file appear.
+This matters for long-lived jobs like preview/dev servers
+(`perk_bash_background({ command: "npm run dev" })`): the agent gets a kill
+handle instead of an unstoppable orphan.
 
-> **Why a dedicated tool and not a flag on `bash`?** An earlier design hooked the
-> builtin `bash` and silently rewrote the agent's `command` into detach
-> scaffolding before running it. Since the transcript is the agent's only memory,
-> the agent would later read scaffolding it never typed and conclude it had erred
-> (see issue #2). A separate tool records exactly what the agent typed; the
-> scaffolding stays inside the implementation where it belongs.
+Jobs also **die with opencode on a graceful shutdown.** The plugin tracks every
+running job and group-kills the survivors in its `dispose` hook, which opencode
+calls on teardown (verified: a `sleep 90` fired via `perk_bash_background` is
+reaped when `opencode run` exits). The one case this cannot cover is a hard
+crash or `kill -9` of opencode itself (uncatchable); the returned pgid is the
+manual remedy there.
 
-## Interactive vs. headless: a turn that ends is not always a turn that idles
+## Interactive vs. headless: end your turn, or block in foreground
 
 perk's wake works by *injecting a turn into a live session*. That assumes the
-session is still running after the agent stops. In the **interactive** TUI that
-holds: ending a turn means going idle, the process keeps running, and the human
-typing or perk's injection both produce the next turn. Ending the turn is
-strictly the right move: no blocking, no wasted spend, woken for free.
+session is still running after the agent stops.
 
-In a **headless** run (`opencode run`), ending a turn means the **process
-exits**. There is no idle state to wake; the injected turn would arrive into
-nothing. So an agent that "ends its turn to wait," a reflex that is correct
-interactively, silently breaks the round-trip exactly where fire-and-forget
-matters most.
+- **Human present (interactive TUI):** ending a turn means going idle, the
+  process keeps running, and the human typing or perk's injection both produce
+  the next turn. **Just end your turn.** No blocking, no wasted spend, woken for
+  free. This is strictly the right move.
 
-`perk_wait` is the escape hatch for that case. It is a *blocking* tool call:
-it parks the current turn until a perk event fires (or a timeout), keeping the
-process alive so the wake can land. It returns a bare "awoken"; the real wake
-message arrives as the very next turn, identical to interactive mode (one wake
-path, both modes). The rule the tools advise:
+- **No human (headless, `opencode run`):** ending a turn means the **process
+  exits**, so there is no idle state to wake and the injected turn would arrive
+  into nothing. Instead, block in **foreground bash** on the exit-file path the
+  tool already handed you:
 
-- **Human present (interactive):** end your turn. Do not call `perk_wait`.
-- **No human (headless / unattended):** call `perk_wait` instead of ending your
-  turn.
+  ```bash
+  until [ -e <exit-file> ]; do sleep 0.3; done
+  ```
 
-This deliberately reintroduces a blocking wait, the very thing perk's thesis
-dissolves, but only where the thesis does not apply: with no live host, there is
-no conversation to interrupt, and blocking is the only way not to exit. The two
-modes genuinely want opposite mechanisms.
+  That is the blocking wait, in plain bash, with no plugin machinery. The exit
+  file is written only when the job is truly done (output files are flushed
+  first, then the exit code is written atomically), so the loop is a correct
+  completion gate. When it returns, read the captured output.
+
+This is the same insight that retired `perk_wait`: the headless wait is just a
+bash poll on the rendezvous file perk already gives you.
 
 > **Caveat (poka-yoke gap):** the plugin cannot currently tell from its inputs
 > whether it is interactive or headless, so it cannot enforce this; it can only
-> advise via the tool descriptions. Closing that gap (detecting run mode and
+> advise via the tool description. Closing that gap (detecting run mode and
 > hard-steering the agent) is open work.
 
-## Scope
+## What the four retired tools reduce to
+
+The single-primitive claim rests on these reductions:
+
+- **`perk_register({ path })`** ("watch an arbitrary observable") becomes a job
+  that blocks until the observable changes, then exits:
+
+  ```
+  perk_bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
+  ```
+
+  The poll loop that used to live inside the plugin now lives inside the
+  command. perk keeps exactly one sense organ (a job's exit-code file) instead
+  of two (that file plus a generic stat-poll over registered paths). Anything
+  that can be expressed as "wait for a shell condition" is now in scope, which
+  is *more* general than the old fixed appear/disappear/mtime triggers.
+
+- **`perk_ack({ id })`** was just "re-register." A fresh `perk_bash_background`
+  per event covers it.
+
+- **`perk_cancel({ id })`** was barely better than neglecting to ack. Job
+  listeners now auto-remove on completion; to stop a *running* job, kill it via
+  its pgid.
+
+- **`perk_wait({ timeout_s })`** was the headless blocking escape hatch. It is
+  replaced by the foreground `until [ -e <exit-file> ]; do sleep 0.3; done`
+  shown above: the same blocking wait, in bash, on the file perk already
+  returns.
+
+## Why a dedicated tool and not a flag on `bash`
+
+An earlier design hooked the builtin `bash` and silently rewrote the agent's
+`command` into detach scaffolding before running it. Since the transcript is the
+agent's only memory, the agent would later read scaffolding it never typed and
+conclude it had erred (see issue #2). A separate tool records exactly what the
+agent typed; the scaffolding stays inside the implementation where it belongs.
+
+## Scope, and how perk relates to background-*agent* plugins
 
 perk is **the sense, not the plumbing**. It owns waking the agent; it does *not*
-own task durability, scheduling, or workflow state. That single inversion is why
-this is a tiny plugin and not an orchestration platform, and why the
-conversational-interrupt problem disappears instead of needing machinery. If a
-harness grows native background tasks or event systems, perk consumes or defers
-to them and keeps its value as the general "react to any observable" mechanism.
+own task durability, scheduling, result persistence, or workflow state. That
+single inversion is why this is a tiny plugin and not an orchestration platform,
+and why the conversational-interrupt problem disappears instead of needing
+machinery.
+
+This is the opposite end from delegation plugins like
+[`kdcokenny/opencode-background-agents`](https://github.com/kdcokenny/opencode-background-agents),
+which is the **efferent** side: delegate a *sub-agent*, persist its distilled
+result to markdown so it survives context compaction, and notify on completion.
+That plugin is about *what to run and how to remember its output*; perk is about
+*how the world gets a turn*. perk does not care what produced the signal: a
+build, a timer, a sub-agent, a webhook receiver writing a file. They compose
+cleanly: a delegation plugin could use perk as its wake mechanism, or perk can
+wrap a sub-agent run directly:
+
+```
+perk_bash_background({ command: "opencode run 'do the long research thing'" })
+```
+
+If a harness grows native background tasks or event systems, perk consumes or
+defers to them and keeps its value as the general "react to any observable"
+mechanism.
 
 ## Steal this
 
@@ -185,9 +218,10 @@ just the cheapest universal one.
 ## Try it / verify it
 
 [`TESTING.md`](./TESTING.md) is a self-test written *for a perk-enabled agent*:
-it walks the model through arming listeners, changing files with its own `bash`,
-and observing itself getting woken. Point your agent at it to confirm the
-primitive end to end (and to feel the round-trip from the inside).
+it walks the model through firing background jobs with its own
+`perk_bash_background`, blocking on the rendezvous file, and observing itself
+getting woken. Point your agent at it to confirm the primitive end to end (and
+to feel the round-trip from the inside).
 
 ## Name
 

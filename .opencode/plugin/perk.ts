@@ -1,38 +1,59 @@
 /**
  * perk: a minimal afferent channel for a harnessed model.
  *
- * The model registers interest in a filesystem path; when that path changes,
- * perk injects a conversational turn describing the change. That's the whole
- * product.
+ * One primitive: perk_bash_background. The model fires a shell command as a
+ * detached background job and regains control of its turn IMMEDIATELY. When the
+ * job finishes, perk injects a conversational turn into the (idle) session
+ * reporting the exit code and the sizes/paths of the captured stdout/stderr.
+ * That is the whole product: the world (a finishing job) produces a turn, just
+ * as a human typing would. The human and the world become peers feeding one
+ * serialized conversation.
  *
- * One code path: a stat-poll loop. The native file watcher cannot see
- * arbitrary absolute paths like /tmp (it watches only the project dir and
- * hardcodes a tmp glob in its ignore list), so perk owns its sense organ.
+ * This is the single-primitive rewrite (issue #3). Earlier versions also
+ * exposed perk_register / perk_ack / perk_cancel (watch an arbitrary path,
+ * re-arm, stop) and perk_wait (a headless blocking escape hatch). All four are
+ * gone. The reductions that justify their removal:
  *
- * This is the radically-simplified rewrite (issue #1). Everything that existed
- * only to make the channel configurable or list-able is gone:
- *   - No perk_list. The agent takes its own notes, or gets harmlessly
- *     re-notified, or never acks. No state kept solely to be displayed.
- *   - No reply/noReply. Every fire is a real turn (always reply).
- *   - No idle queue / drain. We fire the instant we see the change. An agent
- *     that can't tolerate an interleaved notification shouldn't use perk.
- *   - No trigger types. Best-effort change detection from existence + mtime +
- *     size; we report what we saw, the agent decides what it means.
- *   - No canned message. The wake text is generated from id + path + the
- *     observed transition.
+ *   - "Watch an arbitrary observable" reduces to a bash job that blocks until
+ *     the observable changes, then exits:
+ *         perk_bash_background({ command:
+ *           "until [ -e some.file ]; do sleep 0.3; done" })
+ *     The poll loop that used to live inside the plugin now lives inside the
+ *     command. perk keeps exactly ONE sense organ (a job's exit-code file)
+ *     instead of two (that file + a generic stat-poll over registered paths).
  *
- * What remains: register a path, fire a turn on change. Re-arm with ack.
+ *   - ack was just "re-register"; a fresh perk_bash_background per event covers
+ *     it. cancel was barely better than neglecting to ack.
  *
- * On top of that core, perk offers ONE convenience tool, perk_bash_background,
- * that runs a shell command as a detached fire-and-forget job and arms a
- * listener on the command's exit-code sentinel. It exists as a SEPARATE tool
- * (not a hook on the builtin bash) on purpose (issue #2): a bash hook had to
- * silently rewrite the agent's `command` into detach scaffolding, and that
- * rewritten command was what landed in the transcript. Since the transcript is
- * the agent's only memory, the agent would later read scaffolding it never
- * typed and conclude it had erred. A dedicated tool records exactly what the
- * agent typed; the scaffolding lives inside the tool implementation where it
- * belongs and never surfaces as a phantom edit to the agent's own words.
+ *   - perk_wait existed only because, headless (`opencode run`), ending a turn
+ *     exits the process so the injected wake lands in nothing. But the agent can
+ *     simply block in FOREGROUND bash on the exit-file path this tool already
+ *     returns:
+ *         until [ -e <exit-file> ]; do sleep 0.3; done
+ *     That is the blocking wait, in plain bash, with no plugin machinery. The
+ *     exit file is written only when the job is truly done (see below), so the
+ *     loop is a correct completion gate.
+ *
+ * Job lifetime (validated against opencode 1.15.13):
+ *   - detached: true  -> the job is its own process-group leader, so child.pid
+ *                        IS the process-group id (PGID). That doubles as a kill
+ *                        handle: `kill -TERM -<pgid>` reaps the whole tree
+ *                        (wrapper + the user command + anything it spawned).
+ *   - child.unref()   -> the job does not hold opencode's event loop open, so
+ *                        the tool returns at once and opencode can still exit.
+ *   - dispose reap    -> opencode calls the plugin's dispose hook on shutdown
+ *                        (confirmed for `opencode run`); we group-kill every
+ *                        tracked job there, so jobs die with opencode on a
+ *                        graceful exit. A hard crash / kill -9 of opencode is
+ *                        the one case that orphans them (uncatchable); the
+ *                        returned PGID is the manual remedy.
+ *
+ * Why a dedicated tool and not a flag on the builtin bash (issue #2): a bash
+ * hook had to silently rewrite the agent's `command` into detach scaffolding,
+ * and that rewritten command was what landed in the transcript. Since the
+ * transcript is the agent's only memory, the agent would later read scaffolding
+ * it never typed and conclude it had erred. A dedicated tool records exactly
+ * what the agent typed; the scaffolding lives inside the implementation.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -43,55 +64,42 @@ import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 
 // ---------------------------------------------------------------------------
-// Sense organ: snapshot a path's existence + mtime + size.
-//
-// We compare {exists, mtimeMs, size} between polls. mtimeMs alone can miss a
-// same-millisecond write; size catches content growth. Known POC gap: a
-// same-mtime, same-size overwrite is invisible to stat. Acceptable here.
+// Sense organ: snapshot a path's existence + size. The only path perk watches
+// is a job's exit-code file, which is ONE-SHOT (written once, when the job is
+// done) and atomic (written via temp + rename), so existence alone is a sound
+// completion signal. We keep size to report captured-output volume.
 // ---------------------------------------------------------------------------
 
-type Snapshot = { exists: boolean; mtimeMs: number; size: number }
-
-function snapshot(path: string): Snapshot {
+function exists(path: string): boolean {
   try {
-    const s = statSync(path)
-    return { exists: true, mtimeMs: s.mtimeMs, size: s.size }
+    statSync(path)
+    return true
   } catch {
-    return { exists: false, mtimeMs: 0, size: 0 }
+    return false
   }
 }
 
-// Best-effort description of the transition we observed, for the wake text.
-// Returns null when nothing changed.
-function describe(base: Snapshot, now: Snapshot): string | null {
-  if (!base.exists && now.exists) return "appeared"
-  if (base.exists && !now.exists) return "disappeared"
-  if (base.exists && now.exists) {
-    if (base.mtimeMs !== now.mtimeMs || base.size !== now.size) return "changed"
+function size(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
   }
-  return null
 }
 
 // ---------------------------------------------------------------------------
-// Listener state. Path + id + the baseline we compare against. Nothing else.
+// Listener state. Every listener watches one job's exit file. When that file
+// appears, perk injects a completion turn and removes the listener: a finished
+// job needs no re-arm and no ack.
 // ---------------------------------------------------------------------------
 
 type Listener = {
   id: string
-  path: string
   sessionID: string // which session to wake; captured from ToolContext
-  armed: boolean // edge-trigger: false after firing, until ack re-arms
-  baseline: Snapshot // the snapshot we compare against; reset on ack
-  // Set when this listener watches a perk_bash_background job's exit-code file.
-  // The exit file (= `path`) is ONE-SHOT: the job writes its exit code once and
-  // is done, so re-arming is meaningless. Job listeners therefore AUTO-REMOVE
-  // on fire (not disarm-and-await-ack), and the wake reports the exit code plus
-  // the byte sizes of the captured stdout/stderr files (so the agent can decide
-  // whether to read them). We never store or echo the command body: it can be
-  // huge, and the agent already has it in its own tool call. perk generates all
-  // three files (.exit/.out/.err) under the project .perk/ dir; the agent does
-  // not choose or even see them until the wake.
-  job?: { out: string; err: string }
+  exit: string // the one-shot exit-code file we watch
+  out: string // captured stdout path (reported by size)
+  err: string // captured stderr path (reported by size)
+  pgid: number // process-group id == child.pid; kill handle for the job tree
 }
 
 const POLL_MS = 300
@@ -99,26 +107,18 @@ const POLL_MS = 300
 // ---------------------------------------------------------------------------
 // Singleton shared state.
 //
-// CRITICAL FINDING: opencode may instantiate the plugin MORE THAN ONCE in a
-// single server process. Each instantiation gets a fresh closure. Keep all
-// mutable state in a single object hung off globalThis, shared by every
-// instance. The plugin function only wires the live `client` into it and
-// starts the one poll loop (guarded so it runs once).
+// opencode may instantiate the plugin MORE THAN ONCE in a single server
+// process; each instantiation gets a fresh closure. Keep all mutable state in
+// one object hung off globalThis, shared by every instance. The plugin function
+// only wires the live `client` into it and starts the one poll loop (guarded).
 // ---------------------------------------------------------------------------
 
 type PerkState = {
   listeners: Map<string, Listener>
+  jobs: Set<number> // tracked PGIDs, group-killed on dispose
   nextId: number
-  // The injector. Set by each plugin instance; latest live client wins. null
-  // until at least one instance has loaded.
   inject: ((sessionID: string, message: string) => Promise<void>) | null
   pollStarted: boolean
-  // perk_wait parks resolvers here. When a listener fires, the poll loop
-  // injects the verdict FIRST (so the detail turn is enqueued before the
-  // agent's turn ends), then resolves every parked waiter. Used only by
-  // headless runs (opencode run) where ending a turn exits the process and the
-  // out-of-band inject would otherwise arrive into nothing; see perk_wait.
-  waiters: Set<() => void>
 }
 
 const GLOBAL_KEY = "__perk_state__"
@@ -128,10 +128,10 @@ function getState(): PerkState {
   if (!g[GLOBAL_KEY]) {
     g[GLOBAL_KEY] = {
       listeners: new Map(),
+      jobs: new Set(),
       nextId: 1,
       inject: null,
       pollStarted: false,
-      waiters: new Set(),
     } satisfies PerkState
   }
   return g[GLOBAL_KEY] as PerkState
@@ -139,8 +139,8 @@ function getState(): PerkState {
 
 // Logging: NEVER write to stdout/stderr. When perk runs inside the opencode
 // TUI, the renderer owns that surface and our writes corrupt the display.
-// Append to a file instead. Opt out / redirect via PERK_LOG (set to "" or
-// "off" to silence). Failures here are swallowed: logging must never break the
+// Append to a file instead. Opt out / redirect via PERK_LOG (set to "" or "off"
+// to silence). Failures here are swallowed: logging must never break the
 // channel.
 const LOG_PATH =
   process.env.PERK_LOG === undefined ? "/tmp/perk.log" : process.env.PERK_LOG
@@ -160,145 +160,64 @@ function startPoll(S: PerkState) {
   if (S.pollStarted) return
   S.pollStarted = true
   const timer = setInterval(() => {
-    // Collect everything that fired this tick, so we can inject all verdicts
-    // BEFORE waking any parked perk_wait. The ordering matters in headless runs
-    // (see PerkState.waiters): the verdict turn must be enqueued before the
-    // agent's wait returns and its turn ends.
     const fired: { sessionID: string; message: string }[] = []
-    const remove: string[] = [] // job listeners auto-removed after this tick
     for (const l of S.listeners.values()) {
-      if (!l.armed) continue
-      const now = snapshot(l.path)
-      const what = describe(l.baseline, now)
-      if (!what) continue
-      l.armed = false // edge-trigger: stop re-firing this tick regardless
-      l.baseline = now
-      log("fired", { id: l.id, path: l.path, what, job: !!l.job })
-      let message: string
-      if (l.job) {
-        // Backgrounded job: ONE-SHOT exit file holding the bare exit code. Read
-        // the code, then mark this listener for removal: re-arming a finished
-        // job makes no sense, and we do not want dead job listeners piling up
-        // or being accidentally perk_ack'd back to life. Identify by id only;
-        // never replay the (possibly huge) command body. Report the captured
-        // stdout/stderr by path + byte size so the agent can decide what (if
-        // anything) is worth reading.
-        let code = "?"
-        try {
-          code = readFileSync(l.path, "utf8").trim() || "?"
-        } catch {
-          // exit file vanished or unreadable; report what we can
-        }
-        const verdict =
-          code === "0"
-            ? "exited cleanly (exit 0)"
-            : code === "?"
-              ? "finished (exit code unreadable)"
-              : `exited with code ${code}`
-        const outBytes = snapshot(l.job.out).size
-        const errBytes = snapshot(l.job.err).size
-        message =
-          `[perk:${l.id}] background job ${verdict}. ` +
-          `stdout: ${outBytes} bytes (${l.job.out}). ` +
-          `stderr: ${errBytes} bytes (${l.job.err}). ` +
-          `Read those files only if a size above suggests something useful. ` +
-          `The job is done and this listener has been auto-removed (no ack ` +
-          `needed). If you ran perk_wait, it has returned too; act on this.`
-        remove.push(l.id)
-      } else {
-        message =
-          `[perk:${l.id}] watched path ${l.path} ${what}. ` +
-          `This listener is now disarmed; perk_ack ${l.id} to re-arm it, ` +
-          `or perk_cancel ${l.id} to stop watching.`
+      if (!exists(l.exit)) continue
+      // The exit file appeared: the job is done and .out/.err are complete (the
+      // exit file is written last, atomically). Read the bare exit code, build
+      // the wake, and remove the listener (one-shot).
+      let code = "?"
+      try {
+        code = readFileSync(l.exit, "utf8").trim() || "?"
+      } catch {
+        // exit file vanished or unreadable; report what we can
       }
+      const verdict =
+        code === "0"
+          ? "exited cleanly (exit 0)"
+          : code === "?"
+            ? "finished (exit code unreadable)"
+            : `exited with code ${code}`
+      const message =
+        `[perk:${l.id}] background job ${verdict}. ` +
+        `stdout: ${size(l.out)} bytes (${l.out}). ` +
+        `stderr: ${size(l.err)} bytes (${l.err}). ` +
+        `Read those files only if a size above suggests something useful. ` +
+        `The job is done; this listener is gone (no ack needed).`
+      log("fired", { id: l.id, code })
       fired.push({ sessionID: l.sessionID, message })
+      S.listeners.delete(l.id)
+      S.jobs.delete(l.pgid) // finished; nothing left to reap
     }
 
-    for (const id of remove) S.listeners.delete(id)
-
     if (fired.length === 0) return
-
-    // Inject all verdicts, THEN release any parked perk_wait. We do not block
-    // the poll tick on this; the ordering guarantee is only within this async
-    // chain (inject awaited before resolve), which is all perk_wait relies on.
     void (async () => {
-      if (S.inject) {
-        for (const f of fired) {
-          await S.inject(f.sessionID, f.message).catch((e) =>
-            log("inject failed", { error: String(e) }),
-          )
-        }
-      }
-      if (S.waiters.size > 0) {
-        const release = [...S.waiters]
-        S.waiters.clear()
-        log("waking perk_wait", { count: release.length })
-        for (const resolve of release) resolve()
+      if (!S.inject) return
+      for (const f of fired) {
+        await S.inject(f.sessionID, f.message).catch((e) =>
+          log("inject failed", { error: String(e) }),
+        )
       }
     })()
   }, POLL_MS)
   if (typeof timer.unref === "function") timer.unref()
 }
 
-// Arm a listener and return its id. Shared by perk_register and
-// perk_bash_background. `job` (the out/err capture paths) marks a one-shot job
-// exit-code file: such listeners auto-remove on fire (see Listener.job) and
-// report an exit code plus captured-output sizes.
-function arm(
-  S: PerkState,
-  path: string,
-  sessionID: string,
-  job?: { out: string; err: string },
-): string {
-  const id = `perk_${S.nextId++}`
-  const listener: Listener = {
-    id,
-    path,
-    sessionID,
-    armed: true,
-    baseline: snapshot(path),
-    job,
-  }
-  S.listeners.set(id, listener)
-  log("registered", {
-    id,
-    path,
-    sessionID,
-    baselineExists: listener.baseline.exists,
-    job: !!job,
-  })
-  return id
-}
+// ---------------------------------------------------------------------------
+// Backgrounding. Run a user command as a detached fire-and-forget job: the tool
+// returns immediately, stdout/stderr are captured to files, and the command's
+// bare exit code lands LAST in the exit file (the one-shot completion sentinel).
+// ---------------------------------------------------------------------------
 
-// Run a user command as a true fire-and-forget background job: the tool call
-// returns immediately, the job survives this process's teardown, stdout/stderr
-// are captured to files, and the command's bare exit code lands in the exit
-// file (the one-shot completion sentinel the listener watches).
-//
-// Because perk_bash_background spawns the job ITSELF (from the plugin's Node
-// process) rather than riding inside opencode's bash tool shell, detachment is
-// handled by Node's spawn options, not by the nohup/disown/fd-severing dance a
-// shared shell required (issue #2 retired the bash hook that needed those):
-//
-//   - detached: true        -> new session/process group; not killed when the
-//                              parent (opencode) exits or its group is signalled.
-//   - stdio: "ignore"       -> child holds no pipe back to us, so we never block
-//                              on its output and there is nothing to drain.
-//   - child.unref()         -> the parent's event loop does not wait on the child.
-//
-// The exit-code capture runs inside the shell command via a subshell so a bare
-// `exit N` in the user's command ends only the job, $? is captured immediately,
-// and the bare exit code is written LAST (after stdout/stderr files are closed),
-// so when the listener sees the exit file appear, .out/.err are already complete.
 function shSingleQuote(s: string): string {
   // Wrap s in single quotes, escaping embedded single quotes as '\''.
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-// Per-job private file set, generated by perk under the project .perk/ dir. The
-// agent never names or sees these until the completion wake reports them. Using
-// the project dir (not /tmp) avoids opencode's external-directory permission
-// prompt that fires on any access outside the worktree.
+// Per-job private file set under the project .perk/ dir. The agent learns these
+// paths from the tool's return value. Using the project dir (not /tmp) avoids
+// opencode's external-directory permission prompt on access outside the
+// worktree.
 type JobFiles = { base: string; exit: string; out: string; err: string }
 
 function makeJobFiles(worktree: string, id: string): JobFiles {
@@ -310,40 +229,53 @@ function makeJobFiles(worktree: string, id: string): JobFiles {
 
 // Build the shell script the detached child runs. Run the user command in a
 // SUBSHELL (so a bare `exit N` ends only the job), redirect its stdout/stderr to
-// the capture files, then write the bare exit code to the exit file.
+// the capture files, then write the bare exit code to the exit file ATOMICALLY
+// (temp + rename) so a foreground `until [ -e exit ]` waiter never observes a
+// half-written file.
 //
-// NEWLINES, not semicolons, separate the parts. The user command can contain a
+// NEWLINES, not semicolons, separate the parts: the user command can contain a
 // trailing `#` comment, and a `#` runs to end-of-LINE; if `( <command> )` were
-// one line, a comment would swallow the closing `)` and the redirect ("syntax
-// error: unexpected end of file"). Putting the command on its own line between
-// a lone `(` and `)` means any comment dies at the newline, and the closing
-// paren + capture survive. The user command may itself be multi-line.
+// one line, a comment would swallow the closing `)`. Putting the command on its
+// own line between a lone `(` and `)` means any comment dies at the newline.
 function backgroundScript(command: string, f: JobFiles): string {
   return [
     "(",
     command,
     `) >${shSingleQuote(f.out)} 2>${shSingleQuote(f.err)}`,
-    `echo "$?" > ${shSingleQuote(f.exit)}`,
+    `__perk_code=$?`,
+    `echo "$__perk_code" > ${shSingleQuote(f.exit + ".tmp")}`,
+    `mv ${shSingleQuote(f.exit + ".tmp")} ${shSingleQuote(f.exit)}`,
   ].join("\n")
 }
 
-// Spawn the detached job. Returns nothing; the listener (armed by the caller on
-// the exit file) is what reports completion. cwd resolves relative paths in the
-// user command.
-function spawnBackground(command: string, f: JobFiles, cwd: string): void {
+// Spawn the detached job. Returns the PGID (== child.pid, because detached
+// makes the child a process-group leader). The caller tracks it for dispose
+// reaping and hands it to the agent as a kill handle.
+function spawnBackground(command: string, f: JobFiles, cwd: string): number {
   const child = spawn("sh", ["-c", backgroundScript(command, f)], {
     cwd,
     detached: true,
     stdio: "ignore",
   })
   child.unref()
+  return child.pid!
+}
+
+// Group-kill a tracked job tree. Negative PID signals the whole process group,
+// so the wrapper AND everything the user command spawned go down together.
+function killJob(pgid: number, sig: NodeJS.Signals = "SIGTERM"): boolean {
+  try {
+    process.kill(-pgid, sig)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export const Perk: Plugin = async ({ client }) => {
   const S = getState()
 
-  // Wire the live client into the shared injector. Every instance overwrites
-  // with its own client; the most recently loaded (live) one wins.
+  // Wire the live client into the shared injector. Latest instance wins.
   S.inject = async (sessionID, message) => {
     await client.session.promptAsync({
       path: { id: sessionID },
@@ -354,9 +286,16 @@ export const Perk: Plugin = async ({ client }) => {
   startPoll(S)
 
   const hooks = {
-    // The poll loop is a process-wide singleton (unref'd), shared across plugin
-    // instances; we deliberately do NOT tear it down per-instance dispose.
-    dispose: async () => {},
+    // Reap every tracked job on shutdown so jobs die with opencode on a graceful
+    // exit (confirmed: dispose fires on `opencode run` teardown). A hard crash /
+    // kill -9 of opencode bypasses this; the returned PGID is the manual remedy.
+    dispose: async () => {
+      for (const pgid of S.jobs) {
+        const ok = killJob(pgid)
+        log("dispose reap", { pgid, ok })
+      }
+      S.jobs.clear()
+    },
 
     tool: {
       perk_bash_background: tool({
@@ -365,179 +304,69 @@ export const Perk: Plugin = async ({ client }) => {
           "and get woken (via perk) when it finishes. This is NOT the builtin " +
           "bash: that one blocks until the command exits and hands you its " +
           "output; this one returns IMMEDIATELY (before the command finishes) " +
-          "and instead arms a one-shot perk listener that hands you a turn on " +
-          "completion with the exit-code verdict and the byte sizes + paths of " +
-          "the captured stdout/stderr (then auto-removes itself: a finished job " +
-          "needs no ack). Use it for long-running work you do not want to block " +
-          "on (builds, downloads, test suites, agent runs). Give just the " +
-          "command (e.g. 'make build' or 'sleep 20; exit 17'): you do NOT add " +
-          "nohup/&/disown/redirection, choose any output paths, or write any " +
-          "sentinel; perk handles detachment, captures stdout/stderr to files " +
-          "under the project .perk/ dir, and records the exit code itself. What " +
-          "lands in your transcript is exactly the command you typed. You get " +
-          "the output-file paths back so you can read them later if needed; if " +
-          "you want a PUBLIC rendezvous file for other observers, just write it " +
-          "yourself inside the command (e.g. '... && touch shared.done'). " +
-          "After calling: if a human is present (interactive session), end your " +
-          "turn and go idle; perk wakes you on completion. If NO human is " +
-          "present (you are running headless, e.g. via `opencode run`), do NOT " +
-          "end your turn, because that exits the process and the wake arrives " +
-          "into nothing: call perk_wait instead to block until the job finishes.",
+          "so you keep control of your turn. perk captures stdout/stderr/exit " +
+          "code to files under the project .perk/ dir and watches the exit " +
+          "file; on completion it injects a turn reporting the exit code and " +
+          "the byte sizes + paths of the captured output. Use it for " +
+          "long-running work you do not want to block on (builds, downloads, " +
+          "test suites, dev/preview servers, agent runs). Give just the command " +
+          "(e.g. 'make build' or 'npm run dev'): do NOT add nohup/&/disown/" +
+          "redirection or choose output paths; perk handles detachment and " +
+          "capture. What lands in your transcript is exactly the command you " +
+          "typed. The tool returns the exit/stdout/stderr paths and a PGID. " +
+          "KILL a job (e.g. a preview server) with `kill -TERM -<pgid>` (note " +
+          "the leading minus: it signals the whole process group). Jobs also " +
+          "die automatically when opencode shuts down gracefully. " +
+          "WAKING: if a human is present (interactive), end your turn and go " +
+          "idle; perk injects the completion turn when the job finishes. If NO " +
+          "human is present (headless, e.g. `opencode run`), ending your turn " +
+          "exits the process and the wake lands in nothing, so instead block in " +
+          "FOREGROUND bash on the returned exit file: " +
+          "`until [ -e <exit-file> ]; do sleep 0.3; done` then read it.",
         args: {
           command: tool.schema
             .string()
             .describe(
               "The shell command to run in the background (just the work, e.g. " +
-                "'make build' or 'sleep 20; exit 17'). No nohup/&/disown/" +
-                "redirection and no output paths to choose; perk adds " +
-                "detachment and captures stdout/stderr to files for you. May be " +
-                "multi-line and may contain # comments.",
+                "'make build' or 'npm run dev'). No nohup/&/disown/redirection " +
+                "and no output paths; perk adds detachment and captures " +
+                "stdout/stderr for you. May be multi-line and may contain # " +
+                "comments.",
             ),
         },
         async execute(args, ctx) {
           const f = makeJobFiles(ctx.directory, `job_${S.nextId}`)
-          const id = arm(S, f.exit, ctx.sessionID, { out: f.out, err: f.err })
-          spawnBackground(args.command, f, ctx.directory)
+          const pgid = spawnBackground(args.command, f, ctx.directory)
+          const id = `perk_${S.nextId++}`
+          S.listeners.set(id, {
+            id,
+            sessionID: ctx.sessionID,
+            exit: f.exit,
+            out: f.out,
+            err: f.err,
+            pgid,
+          })
+          S.jobs.add(pgid)
           log("perk_bash_background: spawned", {
             id,
+            pgid,
             base: f.base,
             cwd: ctx.directory,
           })
           return (
-            `Backgrounded as ${id} (running detached now). perk captures output ` +
-            `for you: stdout -> ${f.out}, stderr -> ${f.err}, exit code -> ` +
-            `${f.exit}. On completion perk wakes you with the exit code and the ` +
-            `byte sizes of those files; the listener auto-removes then (no ack ` +
-            `needed). If a human is present, end your turn now; do not poll. If ` +
-            `you are running headless (no human to wake you), call perk_wait ` +
-            `instead of ending your turn. (perk_cancel ${id} to drop the ` +
-            `listener before it fires.)`
+            `Backgrounded as ${id} (running detached now, pgid ${pgid}). ` +
+            `perk captures output: stdout -> ${f.out}, stderr -> ${f.err}, ` +
+            `exit code -> ${f.exit}. The exit file appears only when the job is ` +
+            `truly done (output files complete first), so it is a sound ` +
+            `completion gate.\n` +
+            `WAKING: if a human is present, end your turn now; perk wakes you ` +
+            `with the exit code and output sizes on completion. If you are ` +
+            `headless (no human to wake you), do NOT end your turn; block in ` +
+            `foreground bash instead: ` +
+            `until [ -e ${f.exit} ]; do sleep 0.3; done\n` +
+            `KILL this job with: kill -TERM -${pgid}  (leading minus = whole ` +
+            `process group). It also dies when opencode shuts down gracefully.`
           )
-        },
-      }),
-
-      perk_wait: tool({
-        description:
-          "Block the current turn until a perk event fires or a timeout " +
-          "elapses, then return. This is the HEADLESS escape hatch: in a normal " +
-          "interactive session you should NOT use it, because ending your turn " +
-          "and going idle is strictly better (perk wakes you for free, with no " +
-          "blocked turn and no wasted spend). But when NO human is present (you " +
-          "are running via `opencode run` or similar), ending your turn exits " +
-          "the process, so the out-of-band wake would arrive into nothing. " +
-          "perk_wait keeps the turn alive so the wake can land. It returns a " +
-          "bare 'awoken' (it does NOT carry the event details): the real wake " +
-          "message, with the exit-code verdict or path transition, arrives as " +
-          "the very next turn, exactly as in an interactive session. So on " +
-          "return, just read the following turn. If there is nothing to wait for " +
-          "(no armed listeners), it returns immediately. Use after " +
-          "perk_bash_background (or perk_register) when running unattended.",
-        args: {
-          timeout_s: tool.schema
-            .number()
-            .optional()
-            .describe(
-              "Max seconds to block before giving up and returning 'timeout' " +
-                "(default 300). A timeout is not an error: it just means no " +
-                "watched path changed in time. Pick a value comfortably longer " +
-                "than the job you expect to finish.",
-            ),
-        },
-        async execute(args, _ctx) {
-          const timeoutS = args.timeout_s ?? 300
-          const anyArmed = () =>
-            [...S.listeners.values()].some((l) => l.armed)
-          log("perk_wait: entering", { timeoutS, anyArmed: anyArmed() })
-          const woken = await new Promise<boolean | "empty">((resolve) => {
-            let done = false
-            const settle = (v: boolean | "empty") => {
-              if (done) return
-              done = true
-              clearTimeout(t)
-              S.waiters.delete(waiter)
-              resolve(v)
-            }
-            const waiter = () => settle(true)
-            const t = setTimeout(() => settle(false), timeoutS * 1000)
-            if (typeof t.unref === "function") t.unref()
-            // Register the waiter BEFORE the armed-state check to close the
-            // check-then-wait race: if a listener fires between registering and
-            // checking, the poll loop will release this waiter. After
-            // registering, if nothing is armed, there is nothing to wait for
-            // (or everything already fired), so settle at once.
-            S.waiters.add(waiter)
-            if (!anyArmed()) settle("empty")
-          })
-          if (woken === "empty") {
-            log("perk_wait: nothing armed, returned immediately")
-            return (
-              "Nothing to wait for: no armed listeners. (Did the job already " +
-              "finish and fire, or did you forget to arm one?) Returning at once."
-            )
-          }
-          if (woken) {
-            log("perk_wait: awoken by event")
-            return (
-              "Awoken by a perk event. The wake message (with the verdict / " +
-              "transition) is the next turn; read it now and act on it."
-            )
-          }
-          log("perk_wait: timed out", { timeoutS })
-          return (
-            `Timed out after ${timeoutS}s with no perk event. None of the ` +
-            `watched paths changed in that window. You can perk_wait again, ` +
-            `check the sentinel directly, or give up.`
-          )
-        },
-      }),
-
-      perk_register: tool({
-        description:
-          "Watch a filesystem path. The next time the path changes (appears, " +
-          "disappears, or its contents change), you receive a turn saying so. " +
-          "Edge-triggered: fires once, then disarms until you perk_ack it. " +
-          "Returns the listener id.",
-        args: {
-          path: tool.schema
-            .string()
-            .describe(
-              "Path to watch (e.g. .perk/job.done or an absolute path). Prefer " +
-                "a path inside the project dir: opencode prompts for permission " +
-                "on any access outside the worktree.",
-            ),
-        },
-        async execute(args, ctx) {
-          const id = arm(S, args.path, ctx.sessionID)
-          return `watching ${args.path} as ${id} (re-arm with perk_ack, stop with perk_cancel)`
-        },
-      }),
-
-      perk_ack: tool({
-        description:
-          "Re-arm a listener that has fired. Takes a fresh baseline snapshot " +
-          "so the next change fires again.",
-        args: {
-          id: tool.schema.string().describe("Listener id from perk_register."),
-        },
-        async execute(args, _ctx) {
-          const l = S.listeners.get(args.id)
-          if (!l) return `no such listener: ${args.id}`
-          l.armed = true
-          l.baseline = snapshot(l.path)
-          log("acked (re-armed)", { id: l.id, baselineExists: l.baseline.exists })
-          return `re-armed ${l.id} watching ${l.path}`
-        },
-      }),
-
-      perk_cancel: tool({
-        description: "Stop watching: remove a listener entirely.",
-        args: {
-          id: tool.schema.string().describe("Listener id from perk_register."),
-        },
-        async execute(args, _ctx) {
-          const existed = S.listeners.delete(args.id)
-          log("cancelled", { id: args.id, existed })
-          return existed ? `cancelled ${args.id}` : `no such listener: ${args.id}`
         },
       }),
     },
