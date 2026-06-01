@@ -4,7 +4,7 @@
  * One primitive: perk_bash_background. The model fires a shell command as a
  * detached background job and regains control of its turn IMMEDIATELY. When the
  * job finishes, perk injects a conversational turn into the (idle) session
- * reporting the exit code and the sizes/paths of the captured stdout/stderr.
+ * reporting the exit code and the byte sizes of the captured stdout/stderr.
  * That is the whole product: the world (a finishing job) produces a turn, just
  * as a human typing would. The human and the world become peers feeding one
  * serialized conversation.
@@ -94,12 +94,11 @@ function size(path: string): number {
 // ---------------------------------------------------------------------------
 
 type Listener = {
-  id: string
   sessionID: string // which session to wake; captured from ToolContext
   exit: string // the one-shot exit-code file we watch
   out: string // captured stdout path (reported by size)
   err: string // captured stderr path (reported by size)
-  pgid: number // process-group id == child.pid; kill handle for the job tree
+  pgid: number // process-group id == child.pid; kill handle + listener key
 }
 
 const POLL_MS = 300
@@ -114,9 +113,8 @@ const POLL_MS = 300
 // ---------------------------------------------------------------------------
 
 type PerkState = {
-  listeners: Map<string, Listener>
+  listeners: Map<number, Listener> // keyed by pgid
   jobs: Set<number> // tracked PGIDs, group-killed on dispose
-  nextId: number
   inject: ((sessionID: string, message: string) => Promise<void>) | null
   pollStarted: boolean
 }
@@ -129,7 +127,6 @@ function getState(): PerkState {
     g[GLOBAL_KEY] = {
       listeners: new Map(),
       jobs: new Set(),
-      nextId: 1,
       inject: null,
       pollStarted: false,
     } satisfies PerkState
@@ -172,21 +169,12 @@ function startPoll(S: PerkState) {
       } catch {
         // exit file vanished or unreadable; report what we can
       }
-      const verdict =
-        code === "0"
-          ? "exited cleanly (exit 0)"
-          : code === "?"
-            ? "finished (exit code unreadable)"
-            : `exited with code ${code}`
       const message =
-        `[perk:${l.id}] background job ${verdict}. ` +
-        `stdout: ${size(l.out)} bytes (${l.out}). ` +
-        `stderr: ${size(l.err)} bytes (${l.err}). ` +
-        `Read those files only if a size above suggests something useful. ` +
-        `The job is done; this listener is gone (no ack needed).`
-      log("fired", { id: l.id, code })
+        `Background job ${l.exit} = ${code}, ` +
+        `.out ${size(l.out)} bytes, .err ${size(l.err)} bytes`
+      log("fired", { pgid: l.pgid, code })
       fired.push({ sessionID: l.sessionID, message })
-      S.listeners.delete(l.id)
+      S.listeners.delete(l.pgid)
       S.jobs.delete(l.pgid) // finished; nothing left to reap
     }
 
@@ -220,10 +208,10 @@ function shSingleQuote(s: string): string {
 // worktree.
 type JobFiles = { base: string; exit: string; out: string; err: string }
 
-function makeJobFiles(worktree: string, id: string): JobFiles {
+function makeJobFiles(worktree: string): JobFiles {
   const dir = join(worktree, ".perk")
   mkdirSync(dir, { recursive: true })
-  const base = join(dir, `${id}-${randomBytes(3).toString("hex")}`)
+  const base = join(dir, `job_${randomBytes(4).toString("hex")}`)
   return { base, exit: `${base}.exit`, out: `${base}.out`, err: `${base}.err` }
 }
 
@@ -306,15 +294,18 @@ export const Perk: Plugin = async ({ client }) => {
           "output; this one returns IMMEDIATELY (before the command finishes) " +
           "so you keep control of your turn. perk captures stdout/stderr/exit " +
           "code to files under the project .perk/ dir and watches the exit " +
-          "file; on completion it injects a turn reporting the exit code and " +
-          "the byte sizes + paths of the captured output. Use it for " +
+          "file, which is written ONLY when the job is truly done (its output " +
+          "files are complete first), making it a sound completion gate. On " +
+          "completion perk injects a turn reporting the exit code and the byte " +
+          "sizes of the captured output. Use it for " +
           "long-running work you do not want to block on (builds, downloads, " +
           "test suites, dev/preview servers, agent runs). Give just the command " +
           "(e.g. 'make build' or 'npm run dev'): do NOT add nohup/&/disown/" +
           "redirection or choose output paths; perk handles detachment and " +
           "capture. What lands in your transcript is exactly the command you " +
-          "typed. The tool returns the exit/stdout/stderr paths and a PGID. " +
-          "KILL a job (e.g. a preview server) with `kill -TERM -<pgid>` (note " +
+          "typed. The tool returns the capture path expression " +
+          "(.perk/job_FOO.{out,err,exit}) and the job's pid. " +
+          "KILL a job (e.g. a preview server) with `kill -TERM -<pid>` (note " +
           "the leading minus: it signals the whole process group). Jobs also " +
           "die automatically when opencode shuts down gracefully. " +
           "WAKING: if a human is present (interactive), end your turn and go " +
@@ -335,11 +326,9 @@ export const Perk: Plugin = async ({ client }) => {
             ),
         },
         async execute(args, ctx) {
-          const f = makeJobFiles(ctx.directory, `job_${S.nextId}`)
+          const f = makeJobFiles(ctx.directory)
           const pgid = spawnBackground(args.command, f, ctx.directory)
-          const id = `perk_${S.nextId++}`
-          S.listeners.set(id, {
-            id,
+          S.listeners.set(pgid, {
             sessionID: ctx.sessionID,
             exit: f.exit,
             out: f.out,
@@ -348,24 +337,13 @@ export const Perk: Plugin = async ({ client }) => {
           })
           S.jobs.add(pgid)
           log("perk_bash_background: spawned", {
-            id,
             pgid,
             base: f.base,
             cwd: ctx.directory,
           })
           return (
-            `Backgrounded as ${id} (running detached now, pgid ${pgid}). ` +
-            `perk captures output: stdout -> ${f.out}, stderr -> ${f.err}, ` +
-            `exit code -> ${f.exit}. The exit file appears only when the job is ` +
-            `truly done (output files complete first), so it is a sound ` +
-            `completion gate.\n` +
-            `WAKING: if a human is present, end your turn now; perk wakes you ` +
-            `with the exit code and output sizes on completion. If you are ` +
-            `headless (no human to wake you), do NOT end your turn; block in ` +
-            `foreground bash instead: ` +
-            `until [ -e ${f.exit} ]; do sleep 0.3; done\n` +
-            `KILL this job with: kill -TERM -${pgid}  (leading minus = whole ` +
-            `process group). It also dies when opencode shuts down gracefully.`
+            `Backgrounded (detached, pid ${pgid}). ` +
+            `Output captured to ${f.base}.{out,err,exit}.`
           )
         },
       }),
