@@ -9,31 +9,6 @@
  * as a human typing would. The human and the world become peers feeding one
  * serialized conversation.
  *
- * This is the single-primitive rewrite (issue #3). Earlier versions also
- * exposed perk_register / perk_ack / perk_cancel (watch an arbitrary path,
- * re-arm, stop) and perk_wait (a headless blocking escape hatch). All four are
- * gone. The reductions that justify their removal:
- *
- *   - "Watch an arbitrary observable" reduces to a bash job that blocks until
- *     the observable changes, then exits:
- *         perk_bash_background({ command:
- *           "until [ -e some.file ]; do sleep 0.3; done" })
- *     The poll loop that used to live inside the plugin now lives inside the
- *     command. perk keeps exactly ONE sense organ (a job's exit-code file)
- *     instead of two (that file + a generic stat-poll over registered paths).
- *
- *   - ack was just "re-register"; a fresh perk_bash_background per event covers
- *     it. cancel was barely better than neglecting to ack.
- *
- *   - perk_wait existed only because, headless (`opencode run`), ending a turn
- *     exits the process so the injected wake lands in nothing. But the agent can
- *     simply block in FOREGROUND bash on the exit-file path this tool already
- *     returns:
- *         until [ -e <exit-file> ]; do sleep 0.3; done
- *     That is the blocking wait, in plain bash, with no plugin machinery. The
- *     exit file is written only when the job is truly done (see below), so the
- *     loop is a correct completion gate.
- *
  * Job lifetime (validated against opencode 1.15.13):
  *   - detached: true  -> the job is its own process-group leader, so child.pid
  *                        IS the process-group id (PGID). That doubles as a kill
@@ -48,12 +23,12 @@
  *                        the one case that orphans them (uncatchable); the
  *                        returned PGID is the manual remedy.
  *
- * Why a dedicated tool and not a flag on the builtin bash (issue #2): a bash
- * hook had to silently rewrite the agent's `command` into detach scaffolding,
- * and that rewritten command was what landed in the transcript. Since the
- * transcript is the agent's only memory, the agent would later read scaffolding
- * it never typed and conclude it had erred. A dedicated tool records exactly
- * what the agent typed; the scaffolding lives inside the implementation.
+ * Why a dedicated tool and not a flag on the builtin bash: a bash hook had to
+ * silently rewrite the agent's `command` into detach scaffolding, and that
+ * rewritten command was what landed in the transcript. Since the transcript is
+ * the agent's only memory, the agent would later read scaffolding it never typed
+ * and conclude it had erred. A dedicated tool records exactly what the agent
+ * typed; the scaffolding lives inside the implementation.
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -64,20 +39,11 @@ import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 
 // ---------------------------------------------------------------------------
-// Sense organ: snapshot a path's existence + size. The only path perk watches
-// is a job's exit-code file, which is ONE-SHOT (written once, when the job is
-// done) and atomic (written via temp + rename), so existence alone is a sound
-// completion signal. We keep size to report captured-output volume.
+// Sense organ: the only thing perk watches is each job's exit-code file, which
+// is ONE-SHOT (written once, when the job is done) and atomic (written via temp
+// + rename), so reading it successfully is itself the completion signal. size()
+// reports captured-output volume in the wake.
 // ---------------------------------------------------------------------------
-
-function exists(path: string): boolean {
-  try {
-    statSync(path)
-    return true
-  } catch {
-    return false
-  }
-}
 
 function size(path: string): number {
   try {
@@ -159,15 +125,15 @@ function startPoll(S: PerkState) {
   const timer = setInterval(() => {
     const fired: { sessionID: string; message: string }[] = []
     for (const l of S.listeners.values()) {
-      if (!exists(l.exit)) continue
-      // The exit file appeared: the job is done and .out/.err are complete (the
-      // exit file is written last, atomically). Read the bare exit code, build
-      // the wake, and remove the listener (one-shot).
-      let code = "?"
+      // The exit file is written last, atomically, only when the job is done
+      // and .out/.err are complete. So a successful read is the completion
+      // signal: build the wake and remove the listener (one-shot). An absent or
+      // unreadable file means not-done-yet; skip and poll again.
+      let code: string
       try {
         code = readFileSync(l.exit, "utf8").trim() || "?"
       } catch {
-        // exit file vanished or unreadable; report what we can
+        continue
       }
       const message =
         `Background job ${l.exit} = ${code}, ` +
@@ -202,10 +168,10 @@ function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-// Per-job private file set under the project .perk/ dir. The agent learns these
-// paths from the tool's return value. Using the project dir (not /tmp) avoids
-// opencode's external-directory permission prompt on access outside the
-// worktree.
+// Per-job private file set under the project .perk/ dir. The agent learns the
+// path expression (job_FOO.{out,err,exit}) from the tool's return value. Using
+// the project dir (not /tmp) avoids opencode's external-directory permission
+// prompt on access outside the worktree.
 type JobFiles = { base: string; exit: string; out: string; err: string }
 
 function makeJobFiles(worktree: string): JobFiles {
@@ -251,9 +217,9 @@ function spawnBackground(command: string, f: JobFiles, cwd: string): number {
 
 // Group-kill a tracked job tree. Negative PID signals the whole process group,
 // so the wrapper AND everything the user command spawned go down together.
-function killJob(pgid: number, sig: NodeJS.Signals = "SIGTERM"): boolean {
+function killJob(pgid: number): boolean {
   try {
-    process.kill(-pgid, sig)
+    process.kill(-pgid, "SIGTERM")
     return true
   } catch {
     return false
