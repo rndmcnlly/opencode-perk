@@ -44,6 +44,12 @@ npm run clean    rm -rf dist
 prepublishOnly   clean + build (runs automatically on npm publish)
 ```
 
+Publishing: the agent should NOT run `npm publish`. The npm account has 2FA, so
+publish needs a one-time password (the CLI errors with `EOTP` mid-publish and an
+agent cannot complete the browser auth flow). The version bump, commit, and push
+are fine for the agent to do; Adam runs `npm publish` himself afterward so the
+browser auth flow can complete.
+
 ## Testing route
 
 There is **no automated test framework and no `test` script**. Testing is a
