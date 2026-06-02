@@ -1,0 +1,50 @@
+{
+  "name": "opencode-perk",
+  "version": "0.1.0",
+  "description": "A minimal afferent channel for a harnessed model: fire a background job, get woken with a conversational turn when it finishes.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "agent",
+    "background",
+    "afferent"
+  ],
+  "license": "MIT",
+  "author": "Adam Smith <adam@adamsmith.as> (https://adamsmith.as)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rndmcnlly/opencode-perk.git"
+  },
+  "homepage": "https://github.com/rndmcnlly/opencode-perk#readme",
+  "bugs": {
+    "url": "https://github.com/rndmcnlly/opencode-perk/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0",
+    "@types/node": "^22.19.19",
+    "typescript": "^5.6.0"
+  }
+}

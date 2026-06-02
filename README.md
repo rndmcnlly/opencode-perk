@@ -62,10 +62,31 @@ be using perk.
 
 ## Install (opencode)
 
-Drop [`.opencode/plugin/perk.ts`](.opencode/plugin/perk.ts) into your project's
-`.opencode/plugin/` directory. It is auto-discovered, no config entry needed.
-Boot opencode in that project and `bash_background` is available to the
-model.
+**From npm (recommended).** Add the package to the `plugin` array in your
+`opencode.json` (project or global):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-perk"]
+}
+```
+
+opencode installs it with Bun at startup and `bash_background` becomes available
+to the model. No build step on your end.
+
+**Drop-in single file (no config entry).** perk is one file with no runtime
+dependencies, so you can also just copy the source into your plugin directory,
+where opencode auto-discovers it:
+
+```bash
+mkdir -p .opencode/plugin
+curl -o .opencode/plugin/perk.ts \
+  https://raw.githubusercontent.com/rndmcnlly/opencode-perk/main/src/index.ts
+```
+
+Use `~/.config/opencode/plugin/` instead for a global install. Either way, boot
+opencode and the tool is live.
 
 ## Example: a non-blocking background job
 
@@ -192,6 +213,23 @@ The reference implementation targets one harness, but the pattern is portable.
 If your harness can inject a turn into a live session, you can build perk on top
 of it. The watcher can be anything that produces a signal; the filesystem is
 just the cheapest universal one.
+
+## Develop (and self-demo this repo)
+
+This repo is package source, not a perpetually-armed demo: it does not load perk
+on itself by default. To dogfood your working copy, opt in by symlinking the
+source into the local plugin directory (gitignored, so it never gets committed):
+
+```bash
+npm install                       # provides @opencode-ai/plugin for the import
+mkdir -p .opencode/plugin
+ln -s ../../src/index.ts .opencode/plugin/perk.ts
+```
+
+opencode auto-loads `.opencode/plugin/`, follows the symlink to `src/index.ts`,
+and `bash_background` goes live in this repo. Because it is a symlink, edits to
+`src/index.ts` take effect on the next opencode start with nothing to copy.
+Remove `.opencode/` to disarm.
 
 ## Try it / verify it
 

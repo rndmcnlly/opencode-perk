@@ -1,4 +1,9 @@
-.opencode/node_modules/
+# npm package: installed deps and compiled output (built on publish).
+node_modules/
+dist/
+
+# Opt-in self-demo: a local symlink that loads perk on this repo (see README).
+.opencode/
 
 # bash_background scratch: per-job stdout/stderr/exit-code capture files.
 .perk/

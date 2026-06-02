@@ -318,3 +318,8 @@ export const Perk: Plugin = async ({ client }) => {
 
   return hooks as any
 }
+
+// Both a named and a default export, matching the flagship community plugins
+// (opencode-wakatime, opencode-helicone-session). opencode collects any exported
+// plugin function; exporting both hedges against loader iteration order.
+export default Perk
