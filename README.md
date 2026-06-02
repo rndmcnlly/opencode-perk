@@ -39,7 +39,7 @@ perk is a single tool.
 
 | Tool | What it does |
 | --- | --- |
-| `bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. |
+| `bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit,drip}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. A still-running job can also push interim turns by appending to `$PERK_DRIP` (see [Streaming](#example-stream-interim-events-while-running)). |
 
 That's the whole surface.
 
@@ -50,15 +50,36 @@ Two ingredients, both of which most harnesses already have:
 1. **A way to inject a turn into a session** out of band (here:
    opencode's fire-and-forget `client.session.promptAsync`).
 2. **A sense organ** that watches the observable. perk uses a **stat-poll loop**
-   over the one thing it needs to watch: each running job's *exit-code file*.
-   The job's wrapper writes that file last, atomically, only when the job is
-   truly done, so its appearance is a sound completion signal.
+   over the files each running job produces: chiefly its *exit-code file*, which
+   the job's wrapper writes last, atomically, only when the job is truly done, so
+   its appearance is a sound completion signal; and optionally its *drip file*
+   (below), tailed for interim events.
 
 When a job's exit file appears, perk injects a turn into the firing session
 describing the outcome (exit code, captured-output byte sizes). The wake
 text is generated, not canned. perk does not try to avoid landing a turn
 mid-flight; an agent that cannot tolerate an interleaved notification should not
 be using perk.
+
+A second, optional sense organ makes one job a *stream* rather than a single
+end-of-job signal: each job also gets an append-only **drip file**
+(`.perk/job_FOO.drip`), exposed to the command as `$PERK_DRIP`. A still-running
+job that appends to it (`echo ... >> "$PERK_DRIP"`) pushes interim turns back to
+the agent without ever re-arming a new `bash_background`. perk tails the drip
+file with the same poll loop and performs **temporal summation**: it withholds
+while the file is still growing, and once it settles for one refractory window
+(one poll interval) it fires the accumulated bytes as a single turn (a
+**spike**). Writes within a window coalesce into one spike; writes spaced
+further apart fire as separate spikes. The quiet gap *is* the message
+delimiter, so the job needs no framing protocol: to send two separate spikes,
+sleep past the window between them. The drip is the stimulus, the spike is the
+response, and the two rates are deliberately decoupled by the coalescer, exactly
+as a neuron decouples input rate from firing rate. A streaming job's natural
+history is zero-or-more spikes, then one terminal exit turn (any unfired drip
+tail is flushed as a final spike first, so no byte is dropped). Every injected
+turn names its job, so interleaved streams from concurrent jobs stay
+disambiguable. A job that never touches `$PERK_DRIP` behaves exactly as the
+one-shot original.
 
 ## Install (opencode)
 
@@ -121,6 +142,41 @@ bash_background({ command: "until [ -e some.file ]; do sleep 0.3; done" })
 The poll loop lives inside the command, so perk needs exactly one sense organ (a
 job's exit-code file) yet covers any waitable condition: a file appearing, a port
 opening, a lock releasing, a sub-process settling.
+
+## Example: stream interim events while running
+
+Sometimes one job has *several* things to report over its lifetime, not just a
+final exit. A watcher, a long build with phases, a tail of a log: you want the
+job to talk back as it goes, without spawning a fresh `bash_background` per
+event. Append to `$PERK_DRIP` (set automatically inside every job) and perk
+delivers what you write as conversational turns:
+
+```
+bash_background({ command: '
+  for page in 1 2 3; do
+    sleep 2
+    build_page "$page"
+    echo "built page $page" >> "$PERK_DRIP"   # one spike per iteration
+  done
+' })
+```
+
+Each `echo` (with the `sleep` ensuring a quiet gap around it) arrives as its own
+**spike**: a turn reading `Spike from background job job_FOO: built page 2`.
+When the loop ends, the usual exit turn follows. So this single call becomes a
+continuous incoming stream: zero or more spikes while it runs, then one exit
+turn.
+
+The delivery rule is **coalescing by quiet gap** (temporal summation): a burst
+of appends that goes quiet for one poll interval is delivered as *one* spike;
+appends spaced further apart arrive separately. You therefore control
+segmentation purely by timing, with no delimiter protocol: write a multi-line
+block in one breath and it lands as one spike; `sleep` half a second between
+events you want delivered separately. Inspect what the agent will receive at any
+time with `tail -f .perk/job_FOO.drip`.
+
+Tear-down is unchanged: a long-lived streaming job (a watcher, a dev server) is
+killed with its pgid exactly as below.
 
 ## Killing a job, and "die with opencode"
 

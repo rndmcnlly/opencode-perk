@@ -6,12 +6,14 @@ background jobs with `bash_background`, block on rendezvous files with your
 own `bash`, and observe yourself getting woken. No external harness, no HTTP.
 Your conversation *is* the test rig.
 
-perk is **one tool**: `bash_background`. It has two behaviors to verify:
+perk is **one tool**: `bash_background`. It has three behaviors to verify:
 
 1. **The afferent channel:** fire a job, end your turn, get woken on completion
    with the exit code and captured-output sizes (interactive).
 2. **The foreground rendezvous:** block on the returned exit-file path in plain
    `bash` (the headless wait), and kill a running job via its pgid.
+3. **The drip stream:** a still-running job pushes interim turns ("spikes") by
+   appending to `$PERK_DRIP`, coalesced by quiet gaps (interactive).
 
 ## How to read this guide
 
@@ -36,7 +38,7 @@ is itself a finding to report, not a gap for this file to paper over.
   canonical delay: long enough that you genuinely go idle before it finishes.
 - Plugin logs go to `/tmp/perk.log` (never the terminal: stderr would corrupt
   the TUI). `tail -f /tmp/perk.log` in another shell to watch `spawned` /
-  `fired` / `dispose reap` events. `PERK_LOG=off` silences.
+  `spike` / `fired` / `dispose reap` events. `PERK_LOG=off` silences.
 
 ---
 
@@ -126,6 +128,53 @@ own completion also arrives; both observers are valid.)
 
 ---
 
+# Part 3: the drip stream (interim spikes)
+
+A single job can talk back *while running* by appending to `$PERK_DRIP` (set
+automatically inside the job). perk delivers those appends as their own turns,
+coalescing them by quiet gaps. These are interactive-wake tests like Part 1: you
+**end your turn** and let the spikes arrive on their own.
+
+## Test 7: separated spikes arrive as distinct turns
+
+1. Call `bash_background` with `command` =
+   ```
+   for n in 1 2 3; do echo "spike $n" >> "$PERK_DRIP"; sleep 8; done
+   ```
+2. **End your turn.** Say one short sentence and stop. Do not poll or loop.
+
+**Pass:** **three separate turns** arrive on their own, one per iteration, each
+naming the job and carrying `spike 1`, `spike 2`, `spike 3` respectively, then a
+final exit turn. The `sleep 8` between appends far exceeds the coalescing window,
+so they must *not* be merged. **Fail:** they arrive merged into one turn, or no
+turns arrive, or the job is not identified.
+
+## Test 8: a burst coalesces into one spike
+
+1. Call `bash_background` with `command` =
+   ```
+   printf 'line a\nline b\nline c\n' >> "$PERK_DRIP"; sleep 20
+   ```
+2. **End your turn.**
+
+**Pass:** a **single** spike turn arrives carrying all three lines together
+(written in one breath, no gaps), well before the job's exit turn ~20s later.
+This shows a burst with no internal quiet gap is summed into one spike, and that
+a spike is delivered promptly while the job is still running (you are not made to
+wait for exit). **Fail:** three separate turns, or the lines do not arrive until
+the job exits.
+
+## Test 9: drip plus exit ordering (optional)
+
+Call `bash_background` with `command` =
+`echo "final note" >> "$PERK_DRIP"; sleep 2; exit 5`. End your turn.
+
+**Pass:** you receive the `final note` spike **and** an exit turn reporting code
+5, with the spike ordered before the exit turn. This confirms a drip tail is
+never lost even when written shortly before exit.
+
+---
+
 ## Cleanup
 
 ```bash
@@ -147,6 +196,10 @@ finish via `kill -TERM -<pgid>`.
 - Was the interactive-vs-headless guidance (end your turn vs. foreground
   until-loop) clear from the tool's return value alone?
 - Did the pgid kill handle work as described (the leading-minus group form)?
+- For the drip stream: was it clear from the tool's description alone that you
+  write to `$PERK_DRIP`, that quiet gaps separate spikes (and bursts coalesce),
+  and that each spike turn names its job? Did the coalescing behave as you
+  expected, or did the segmentation surprise you?
 - Anything about `bash_background` (its single `command` arg with no paths
   to choose; the command recorded verbatim in your own tool call, *not* echoed
   back in the wake; capture reported by size + path; the immediate return; the
@@ -161,3 +214,6 @@ finish via `kill -TERM -<pgid>`.
 - A correct foreground completion gate on the rendezvous file: the headless wait
   with no plugin machinery (Tests 4, 6).
 - A working kill handle for the whole job tree (Test 5).
+- A continuous drip stream from one job: interim spikes delivered while running,
+  coalesced by quiet gaps, each identifying its job, with the tail never lost on
+  exit (Tests 7, 8, 9).
