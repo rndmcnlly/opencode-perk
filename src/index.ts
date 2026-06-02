@@ -9,6 +9,16 @@
  * as a human typing would. The human and the world become peers feeding one
  * serialized conversation.
  *
+ * A running job can also DRIP interim events back: appending to $PERK_DRIP
+ * (echo ... >> "$PERK_DRIP") makes one bash_background call a continuous
+ * afferent stream rather than a single end-of-job signal. perk tails the drip
+ * file and performs temporal summation: a burst of appends that settles for one
+ * refractory window (~one poll interval) is fired as a single turn (a "spike");
+ * writes spaced further apart fire as separate spikes. The quiet gap is the
+ * implicit message delimiter, so the job needs no framing protocol. A streaming
+ * job's natural history is zero-or-more spikes, then one terminal exit turn. A
+ * job that never touches $PERK_DRIP behaves exactly as the one-shot original.
+ *
  * Job lifetime (validated against opencode 1.15.13):
  *   - detached: true  -> the job is its own process-group leader, so child.pid
  *                        IS the process-group id (PGID). That doubles as a kill
@@ -33,16 +43,39 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { statSync, appendFileSync, readFileSync, mkdirSync } from "node:fs"
+import {
+  statSync,
+  appendFileSync,
+  readFileSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  closeSync,
+} from "node:fs"
 import { spawn } from "node:child_process"
 import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 
 // ---------------------------------------------------------------------------
-// Sense organ: the only thing perk watches is each job's exit-code file, which
-// is ONE-SHOT (written once, when the job is done) and atomic (written via temp
-// + rename), so reading it successfully is itself the completion signal. size()
-// reports captured-output volume in the wake.
+// Sense organs. perk watches two files per job:
+//
+//   .exit  ONE-SHOT and atomic (temp + rename), written once when the job is
+//          done and its .out/.err are complete. A successful read is itself the
+//          completion signal: read it, fire the terminal turn, retire the
+//          listener.
+//
+//   .drip  APPEND-ONLY afferent fiber. A long-running job appends interim events
+//          to it (echo ... >> "$PERK_DRIP") without ever re-arming a new job.
+//          perk tails it from a byte cursor and performs TEMPORAL SUMMATION: a
+//          burst of appends that settles (stops growing for one refractory
+//          window) is summed into a single fired turn (a "spike"). Sub-threshold
+//          inputs spaced apart fire as separate spikes; rapid inputs coalesce.
+//          The drip is the stimulus; the spike is the response; the two rates
+//          are deliberately decoupled by the coalescer, exactly as a neuron
+//          decouples input rate from firing rate.
+//
+// size() reports captured-output volume in the terminal turn and is the basis of
+// the drip cursor comparison.
 // ---------------------------------------------------------------------------
 
 function size(path: string): number {
@@ -53,18 +86,43 @@ function size(path: string): number {
   }
 }
 
+// Read the byte range [from, to) of a file as utf8. Used to pull only the
+// not-yet-fired tail of a .drip file each time it settles, so perk never
+// re-reads or re-fires bytes it has already turned into a spike. A ranged read
+// (open/read/close) avoids slurping the whole growing file every tick.
+function readRange(path: string, from: number, to: number): string {
+  const len = to - from
+  if (len <= 0) return ""
+  let fd: number | undefined
+  try {
+    fd = openSync(path, "r")
+    const buf = Buffer.allocUnsafe(len)
+    const n = readSync(fd, buf, 0, len, from)
+    return buf.toString("utf8", 0, n)
+  } catch {
+    return ""
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Listener state. Every listener watches one job's exit file. When that file
-// appears, perk injects a completion turn and removes the listener: a finished
-// job needs no re-arm and no ack.
+// Listener state. Every listener watches one job. The .exit file fires once and
+// retires the listener; the .drip file may fire many spikes over the job's life.
+// A finished job needs no re-arm and no ack.
 // ---------------------------------------------------------------------------
 
 type Listener = {
   sessionID: string // which session to wake; captured from ToolContext
+  base: string // job_FOO path stem; identifies the job in every turn
   exit: string // the one-shot exit-code file we watch
   out: string // captured stdout path (reported by size)
   err: string // captured stderr path (reported by size)
+  drip: string // append-only afferent fiber the job writes interim events to
   pgid: number // process-group id == child.pid; kill handle + listener key
+  // Drip cursor (temporal-summation state):
+  dripOffset: number // bytes already fired as spikes
+  dripSeen: number // file size at the previous tick; growth resets the window
 }
 
 const POLL_MS = 300
@@ -123,20 +181,63 @@ function startPoll(S: PerkState) {
   if (S.pollStarted) return
   S.pollStarted = true
   const timer = setInterval(() => {
+    // Turns fired this tick, in order. Drip spikes are appended before the
+    // terminal exit turn for the same job, so an agent reading the transcript
+    // sees a job's interim spikes precede its exit. Every turn names its job
+    // (l.base) so interleaved streams from concurrent jobs stay disambiguable.
     const fired: { sessionID: string; message: string }[] = []
+
     for (const l of S.listeners.values()) {
+      // --- Afferent fiber: temporal summation over the .drip file ----------
+      // Compare the file's current size to its size last tick. While it is
+      // still GROWING we withhold (the burst hasn't settled). Once it stops
+      // growing for one refractory window (a single poll interval) AND there
+      // are unfired bytes, we sum that tail into one spike and advance the
+      // cursor. Bytes spaced more than a window apart therefore fire as
+      // separate spikes; bytes within a window coalesce into one.
+      const dripSize = size(l.drip)
+      if (dripSize > l.dripSeen) {
+        // Still growing: arm/extend the window, fire nothing yet.
+        l.dripSeen = dripSize
+      } else if (dripSize > l.dripOffset) {
+        // Settled with unfired bytes: fire a spike carrying the new tail.
+        const chunk = readRange(l.drip, l.dripOffset, dripSize)
+        l.dripOffset = dripSize
+        if (chunk.length > 0) {
+          log("spike", { pgid: l.pgid, bytes: chunk.length })
+          fired.push({
+            sessionID: l.sessionID,
+            message: `Spike from background job ${l.base}:\n${chunk.trimEnd()}`,
+          })
+        }
+      }
+
+      // --- Exit: the one-shot terminal signal ------------------------------
       // The exit file is written last, atomically, only when the job is done
-      // and .out/.err are complete. So a successful read is the completion
-      // signal: build the wake and remove the listener (one-shot). An absent or
-      // unreadable file means not-done-yet; skip and poll again.
+      // and .out/.err are complete. A successful read is the completion signal.
+      // An absent/unreadable file means not-done-yet; skip and poll again.
       let code: string
       try {
         code = readFileSync(l.exit, "utf8").trim() || "?"
       } catch {
         continue
       }
+
+      // The job ended. Flush any drip tail still unfired (e.g. a final burst
+      // written and then the process exited within the same window, so the
+      // grow/settle dance never got a quiet tick) as its OWN spike, before the
+      // terminal turn. This guarantees no drip byte is ever dropped on exit.
+      const finalDrip = readRange(l.drip, l.dripOffset, size(l.drip))
+      if (finalDrip.trim().length > 0) {
+        log("spike (final)", { pgid: l.pgid, bytes: finalDrip.length })
+        fired.push({
+          sessionID: l.sessionID,
+          message: `Spike from background job ${l.base}:\n${finalDrip.trimEnd()}`,
+        })
+      }
+
       const message =
-        `Background job ${l.exit} = ${code}, ` +
+        `Background job ${l.base} exited = ${code}, ` +
         `.out ${size(l.out)} bytes, .err ${size(l.err)} bytes`
       log("fired", { pgid: l.pgid, code })
       fired.push({ sessionID: l.sessionID, message })
@@ -172,13 +273,25 @@ function shSingleQuote(s: string): string {
 // path expression (job_FOO.{out,err,exit}) from the tool's return value. Using
 // the project dir (not /tmp) avoids opencode's external-directory permission
 // prompt on access outside the worktree.
-type JobFiles = { base: string; exit: string; out: string; err: string }
+type JobFiles = {
+  base: string
+  exit: string
+  out: string
+  err: string
+  drip: string
+}
 
 function makeJobFiles(worktree: string): JobFiles {
   const dir = join(worktree, ".perk")
   mkdirSync(dir, { recursive: true })
   const base = join(dir, `job_${randomBytes(4).toString("hex")}`)
-  return { base, exit: `${base}.exit`, out: `${base}.out`, err: `${base}.err` }
+  return {
+    base,
+    exit: `${base}.exit`,
+    out: `${base}.out`,
+    err: `${base}.err`,
+    drip: `${base}.drip`,
+  }
 }
 
 // Build the shell script the detached child runs. Run the user command in a
@@ -187,12 +300,18 @@ function makeJobFiles(worktree: string): JobFiles {
 // (temp + rename) so a foreground `until [ -e exit ]` waiter never observes a
 // half-written file.
 //
+// The subshell also inherits $PERK_DRIP, the path to this job's append-only drip
+// file. A long-running job can `echo ... >> "$PERK_DRIP"` (or `printf`, or
+// `tee -a`) to push interim events back to the agent WITHOUT re-arming a new
+// bash_background. perk tails that file and coalesces bursts (see startPoll).
+//
 // NEWLINES, not semicolons, separate the parts: the user command can contain a
 // trailing `#` comment, and a `#` runs to end-of-LINE; if `( <command> )` were
 // one line, a comment would swallow the closing `)`. Putting the command on its
 // own line between a lone `(` and `)` means any comment dies at the newline.
 function backgroundScript(command: string, f: JobFiles): string {
   return [
+    `export PERK_DRIP=${shSingleQuote(f.drip)}`,
     "(",
     command,
     `) >${shSingleQuote(f.out)} 2>${shSingleQuote(f.err)}`,
@@ -271,15 +390,30 @@ export const Perk: Plugin = async ({ client }) => {
           "capture. What lands in your transcript is exactly the command you " +
           "typed. The tool returns the capture path expression " +
           "(.perk/job_FOO.{out,err,exit}) and the job's pid. " +
-          "KILL a job (e.g. a preview server) with `kill -TERM -<pid>` (note " +
+          "STREAMING (drip): a still-running job can push interim events back " +
+          "to you WITHOUT re-arming a new job by appending to the file named in " +
+          "$PERK_DRIP (set automatically inside the job), e.g. " +
+          "`echo \"built page 3\" >> \"$PERK_DRIP\"`. perk tails that file and " +
+          "coalesces writes by quiet gaps: a burst of appends that goes quiet " +
+          "for ~300ms is delivered as ONE turn (a 'spike'); writes separated by " +
+          "a longer gap arrive as separate spikes. So a quiet gap is the " +
+          "implicit message delimiter (sleep ~0.5s between events you want " +
+          "delivered separately; no framing protocol needed). This makes one " +
+          "bash_background call a continuous incoming stream: zero or more " +
+          "spike turns while it runs, then one exit turn when it ends. Every " +
+          "injected turn names its job (job_FOO) so you can disambiguate " +
+          "interleaved streams from concurrent jobs. " +
+          "KILL a job (e.g. a preview server or a long-lived watcher) with " +
+          "`kill -TERM -<pid>` (note " +
           "the leading minus: it signals the whole process group). Jobs also " +
           "die automatically when opencode shuts down gracefully. " +
           "WAKING: if a human is present (interactive), end your turn and go " +
-          "idle; perk injects the completion turn when the job finishes. If NO " +
+          "idle; perk injects spike/completion turns as they occur. If NO " +
           "human is present (headless, e.g. `opencode run`), ending your turn " +
           "exits the process and the wake lands in nothing, so instead block in " +
           "FOREGROUND bash on the returned exit file: " +
-          "`until [ -e <exit-file> ]; do sleep 0.3; done` then read it.",
+          "`until [ -e <exit-file> ]; do sleep 0.3; done` then read it (and " +
+          "`cat` the .drip file for any interim events).",
         args: {
           command: tool.schema
             .string()
@@ -296,10 +430,14 @@ export const Perk: Plugin = async ({ client }) => {
           const pgid = spawnBackground(args.command, f, ctx.directory)
           S.listeners.set(pgid, {
             sessionID: ctx.sessionID,
+            base: f.base,
             exit: f.exit,
             out: f.out,
             err: f.err,
+            drip: f.drip,
             pgid,
+            dripOffset: 0,
+            dripSeen: 0,
           })
           S.jobs.add(pgid)
           log("bash_background: spawned", {
@@ -309,7 +447,7 @@ export const Perk: Plugin = async ({ client }) => {
           })
           return (
             `Backgrounded (detached, pid ${pgid}). ` +
-            `Output captured to ${f.base}.{out,err,exit}.`
+            `Output captured to ${f.base}.{out,err,exit,drip}.`
           )
         },
       }),
