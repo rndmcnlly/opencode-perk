@@ -4,10 +4,10 @@
 
 > **Proof of concept.** This repo demonstrates a general pattern: giving an
 > agent a controllable way to *speak out of turn*, woken by the world rather
-> than only by a human typing. The reference implementation is a single-file
-> plugin for [opencode](https://opencode.ai), verified against **1.18.3**. The
-> pattern is not specific to opencode. If you maintain a different agent
-> harness, steal it.
+> than only by a human typing. The reference implementation is a small modular
+> plugin for [opencode](https://opencode.ai), verified against **1.18.3**, with a
+> generated single-file bundle for drop-in installation. The pattern is not
+> specific to opencode. If you maintain a different agent harness, steal it.
 
 ## The idea in one sentence
 
@@ -101,14 +101,15 @@ whitespace-only writes are retained in the artifact but do not produce turns.
 opencode installs it with Bun at startup and `bash_background` becomes available
 to the model. No build step on your end.
 
-**Drop-in single file (no config entry).** perk is one file with no runtime
-dependencies, so you can also just copy the source into your plugin directory,
-where opencode auto-discovers it:
+**Drop-in single file (no config entry).** The npm package includes a generated
+single-file bundle with no runtime dependency beyond the OpenCode plugin SDK.
+Download a pinned release into your plugin directory, where opencode
+auto-discovers it:
 
 ```bash
 mkdir -p .opencode/plugin
-curl -o .opencode/plugin/perk.ts \
-  https://raw.githubusercontent.com/rndmcnlly/opencode-perk/main/src/index.ts
+curl -o .opencode/plugin/perk.js \
+  https://unpkg.com/opencode-perk@0.3.0/dist/perk.js
 ```
 
 Use `~/.config/opencode/plugin/` instead for a global install. Either way, boot
@@ -312,11 +313,23 @@ ln -s ../../src/index.ts .opencode/plugin/perk.ts
 ```
 
 opencode auto-loads `.opencode/plugin/`, follows the symlink to `src/index.ts`,
-and `bash_background` goes live in this repo. Because it is a symlink, edits to
-`src/index.ts` take effect on the next opencode start with nothing to copy.
-Remove `.opencode/` to disarm.
+and resolves its sibling source modules, so `bash_background` goes live from
+this checkout. Because it is a symlink, edits take effect on the next opencode
+start with nothing to copy. This project-local plugin is discovered only when
+opencode starts in this worktree; sessions elsewhere continue using any npm
+version in the global config. Remove `.opencode/` to disarm local development.
 
 ## Try it / verify it
+
+Run the deterministic unit and process integration suite first:
+
+```bash
+npm test
+```
+
+`npm run check` builds both the normal npm modules and the generated drop-in
+bundle before running the suite. Generated output lives under `dist/`, is
+included by `npm pack` / `npm publish`, and is not committed.
 
 [`TESTING.md`](./TESTING.md) is a self-test written *for a perk-enabled agent*:
 it walks the model through firing background jobs with its own

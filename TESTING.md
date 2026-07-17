@@ -1,5 +1,9 @@
 # Testing perk (from inside a perk-enabled agent)
 
+This is the live OpenCode acceptance protocol. Run `npm test` first for the
+deterministic monitor, spool, and process-wrapper suite; use this document for
+the behavior only a real harnessed conversation can verify.
+
 This guide is written **for an agent** running in an opencode session where
 `.opencode/plugin/perk.ts` is loaded. You exercise the plugin on yourself: fire
 background jobs with `bash_background`, block on rendezvous files with your

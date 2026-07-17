@@ -14,7 +14,14 @@ See `README.md` for the concept and `TESTING.md` for the self-test protocol.
 ## File layout
 
 ```
-src/index.ts     The entire implementation (single file, fully commented).
+src/index.ts     Thin OpenCode adapter and named/default exports.
+src/tool.ts      Tool schema, description, and execution adapter.
+src/runtime.ts   Job orchestration, timers, singleton lifecycle, disposal.
+src/monitor.ts   Deterministic drip/exit observation and ordered delivery.
+src/job.ts       Shell wrapper, detached spawn, process-group termination.
+src/spool.ts     Secure job files, byte reads, and retention sweep.
+src/log.ts       Optional private file logging.
+test/            Node test suite, run as TypeScript through tsx.
 dist/            tsc build output. Gitignored; built on publish.
 README.md        Conceptual doc + install instructions.
 TESTING.md       Manual, agent-driven self-test protocol.
@@ -24,7 +31,7 @@ os.tmpdir()/opencode/perk/  Runtime spool; one private directory per job.
 .opencode/       Opt-in self-demo symlink dir (see below). Gitignored.
 ```
 
-Keep the implementation in the single file `src/index.ts`. There is no runtime
+Keep module boundaries aligned with those responsibilities. There is no runtime
 dependency beyond Node built-ins plus the peer `@opencode-ai/plugin`.
 
 ## The npm package
@@ -39,9 +46,11 @@ dependency beyond Node built-ins plus the peer `@opencode-ai/plugin`.
 Scripts:
 
 ```
-npm run build    tsc -p tsconfig.json
+npm run build    build modules and the standalone dist/perk.js bundle
+npm test         deterministic unit and process integration tests
+npm run check    build modules + standalone bundle, then test
 npm run clean    rm -rf dist
-prepublishOnly   clean + build (runs automatically on npm publish)
+prepack          clean + build (runs on npm pack and npm publish)
 ```
 
 Publishing: the agent should NOT run `npm publish`. The npm account has 2FA, so
@@ -52,9 +61,9 @@ browser auth flow can complete.
 
 ## Testing route
 
-There is **no automated test framework and no `test` script**. Testing is a
-manual self-test the agent performs against a live opencode session, following
-`TESTING.md` ("your conversation *is* the test rig").
+Run `npm test` for deterministic behavior. Testing against the actual injected
+conversation remains a manual self-test following `TESTING.md` ("your
+conversation *is* the test rig").
 
 To arm the plugin in this repo so opencode loads it:
 
@@ -64,10 +73,11 @@ mkdir -p .opencode/plugin
 ln -s ../../src/index.ts .opencode/plugin/perk.ts
 ```
 
-opencode auto-loads `.opencode/plugin/`, so `bash_background` goes live here.
-Remove `.opencode/` to disarm; the repo does not load perk on itself by default.
+opencode auto-loads `.opencode/plugin/`, so this checkout's `bash_background`
+overrides the usual npm-loaded version in sessions started here. Remove the
+symlink to stop local development; the global npm plugin remains available.
 
-Then point an agent at `TESTING.md` and run the tests. Build verification is
-just `npm run build`. Runtime logging is off by default; `PERK_LOG=1` writes to
-the spool's `log` file. perk never writes stdout/stderr, which would corrupt the
-TUI. Completed job directories expire after 24 hours.
+Then point an agent at `TESTING.md` and run the live tests. Full automated
+verification is `npm run check`. Runtime logging is off by default;
+`PERK_LOG=1` writes to the spool's `log` file. perk never writes stdout/stderr,
+which would corrupt the TUI. Completed job directories expire after 24 hours.
