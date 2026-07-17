@@ -20,7 +20,7 @@ README.md        Conceptual doc + install instructions.
 TESTING.md       Manual, agent-driven self-test protocol.
 package.json     Package metadata and scripts.
 tsconfig.json    ES2022 / ESNext / Bundler resolution, emits declarations.
-.perk/           Runtime scratch dir for job capture files. Gitignored.
+os.tmpdir()/opencode/perk/  Runtime spool; one private directory per job.
 .opencode/       Opt-in self-demo symlink dir (see below). Gitignored.
 ```
 
@@ -67,7 +67,7 @@ ln -s ../../src/index.ts .opencode/plugin/perk.ts
 opencode auto-loads `.opencode/plugin/`, so `bash_background` goes live here.
 Remove `.opencode/` to disarm; the repo does not load perk on itself by default.
 
-Then point an agent at `TESTING.md` and run the six tests (interactive wake and
-foreground rendezvous). Build verification is just `npm run build`. Runtime logs
-for debugging go to `/tmp/perk.log` (set `PERK_LOG=off` to silence; perk never
-writes stdout/stderr, which would corrupt the TUI). Clean up with `rm -rf .perk`.
+Then point an agent at `TESTING.md` and run the nine tests. Build verification is
+just `npm run build`. Runtime logging is off by default; `PERK_LOG=1` writes to
+the spool's `log` file. perk never writes stdout/stderr, which would corrupt the
+TUI. Completed job directories expire after 24 hours.

@@ -5,5 +5,8 @@ dist/
 # Opt-in self-demo: a local symlink that loads perk on this repo (see README).
 .opencode/
 
-# bash_background scratch: per-job stdout/stderr/exit-code capture files.
+# Legacy captures from perk <= 0.2; current versions use OpenCode's temp dir.
 .perk/
+
+# Field notes from self-test runs: working-tree scratch, never a tracked artifact.
+FEEDBACK.md

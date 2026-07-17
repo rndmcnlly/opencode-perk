@@ -5,7 +5,7 @@
 > **Proof of concept.** This repo demonstrates a general pattern: giving an
 > agent a controllable way to *speak out of turn*, woken by the world rather
 > than only by a human typing. The reference implementation is a single-file
-> plugin for [opencode](https://opencode.ai), verified against **1.15.13**. The
+> plugin for [opencode](https://opencode.ai), verified against **1.18.3**. The
 > pattern is not specific to opencode. If you maintain a different agent
 > harness, steal it.
 
@@ -39,7 +39,7 @@ perk is a single tool.
 
 | Tool | What it does |
 | --- | --- |
-| `bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pid` and a capture path expression (`.perk/job_FOO.{out,err,exit,drip}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. A still-running job can also push interim turns by appending to `$PERK_DRIP` (see [Streaming](#example-stream-interim-events-while-running)). |
+| `bash_background({ command })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pgid` and a capture path expression (`<job-dir>/{out,err,drip,exit}`). When the job finishes, perk injects a turn reporting the exit code and the byte sizes of the captured output. A still-running job can also push interim turns by appending to `$PERK_DRIP` (see [Streaming](#example-stream-interim-events-while-running)). |
 
 That's the whole surface.
 
@@ -63,7 +63,7 @@ be using perk.
 
 A second, optional sense organ makes one job a *stream* rather than a single
 end-of-job signal: each job also gets an append-only **drip file**
-(`.perk/job_FOO.drip`), exposed to the command as `$PERK_DRIP`. A still-running
+(`<job-dir>/drip`), exposed to the command as `$PERK_DRIP`. A still-running
 job that appends to it (`echo ... >> "$PERK_DRIP"`) pushes interim turns back to
 the agent without ever re-arming a new `bash_background`. perk tails the drip
 file with the same poll loop and performs **temporal summation**: it withholds
@@ -125,9 +125,14 @@ of the captured output, so you read the output files only if there
 is something worth reading. No polling, no blocked turn, no paths to invent, no
 hand-rolled backgrounding.
 
-Output and the exit code land under a project-local `.perk/` directory (kept in
-the project, not `/tmp`, so opencode does not prompt for out-of-worktree
-access).
+Output and the exit code land under `os.tmpdir()/opencode/perk/` (normally
+`$TMPDIR/opencode/perk/` on macOS), which opencode allows its file tools to
+access without an external-directory prompt. Each job gets a short random
+directory containing `out`, `err`, `drip`, and atomic completion gate `exit`.
+Nothing is written into the project. Completed job directories expire after 24
+hours.
+Runtime logging is off by default; set `PERK_LOG=1` before starting opencode to
+write the spool's `log` file, or set it to an explicit path.
 
 ## Example: wait on any observable
 
@@ -162,7 +167,7 @@ bash_background({ command: '
 ```
 
 Each `echo` (with the `sleep` ensuring a quiet gap around it) arrives as its own
-**spike**: a turn reading `Spike from background job job_FOO: built page 2`.
+**spike**: a turn reading `Spike from job 3fa18c2e: built page 2`.
 When the loop ends, the usual exit turn follows. So this single call becomes a
 continuous incoming stream: zero or more spikes while it runs, then one exit
 turn.
@@ -173,7 +178,7 @@ appends spaced further apart arrive separately. You therefore control
 segmentation purely by timing, with no delimiter protocol: write a multi-line
 block in one breath and it lands as one spike; `sleep` half a second between
 events you want delivered separately. Inspect what the agent will receive at any
-time with `tail -f .perk/job_FOO.drip`.
+time with `tail -f <job-dir>/drip`, using the directory returned by the tool.
 
 Tear-down is unchanged: a long-lived streaming job (a watcher, a dev server) is
 killed with its pgid exactly as below.

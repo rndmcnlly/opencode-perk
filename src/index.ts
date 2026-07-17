@@ -19,7 +19,7 @@
  * job's natural history is zero-or-more spikes, then one terminal exit turn. A
  * job that never touches $PERK_DRIP behaves exactly as the one-shot original.
  *
- * Job lifetime (validated against opencode 1.15.13):
+ * Job lifetime (validated against opencode 1.18.3):
  *   - detached: true  -> the job is its own process-group leader, so child.pid
  *                        IS the process-group id (PGID). That doubles as a kill
  *                        handle: `kill -TERM -<pgid>` reaps the whole tree
@@ -45,26 +45,31 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import {
   statSync,
+  lstatSync,
   appendFileSync,
   readFileSync,
+  readdirSync,
   mkdirSync,
+  chmodSync,
+  rmSync,
   openSync,
   readSync,
   closeSync,
 } from "node:fs"
 import { spawn } from "node:child_process"
 import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 
 // ---------------------------------------------------------------------------
 // Sense organs. perk watches two files per job:
 //
-//   .exit  ONE-SHOT and atomic (temp + rename), written once when the job is
-//          done and its .out/.err are complete. A successful read is itself the
+//   exit   ONE-SHOT and atomic (temp + rename), written once when the job is
+//          done and its out/err are complete. A successful read is itself the
 //          completion signal: read it, fire the terminal turn, retire the
 //          listener.
 //
-//   .drip  APPEND-ONLY afferent fiber. A long-running job appends interim events
+//   drip   APPEND-ONLY afferent fiber. A long-running job appends interim events
 //          to it (echo ... >> "$PERK_DRIP") without ever re-arming a new job.
 //          perk tails it from a byte cursor and performs TEMPORAL SUMMATION: a
 //          burst of appends that settles (stops growing for one refractory
@@ -87,7 +92,7 @@ function size(path: string): number {
 }
 
 // Read the byte range [from, to) of a file as utf8. Used to pull only the
-// not-yet-fired tail of a .drip file each time it settles, so perk never
+// not-yet-fired tail of a drip file each time it settles, so perk never
 // re-reads or re-fires bytes it has already turned into a spike. A ranged read
 // (open/read/close) avoids slurping the whole growing file every tick.
 function readRange(path: string, from: number, to: number): string {
@@ -106,20 +111,33 @@ function readRange(path: string, from: number, to: number): string {
   }
 }
 
+// Read the last `max` bytes of a file as utf8 (a tail snippet). Used to fold a
+// failing job's stderr into its exit turn so a dead-on-arrival command (e.g. a
+// prose first line the subshell tried to run, or any command-not-found) is
+// legible in the conversation itself, not only by separately reading err.
+function tail(path: string, max: number): string {
+  const total = size(path)
+  if (total <= 0) return ""
+  const from = total > max ? total - max : 0
+  const text = readRange(path, from, total).trimEnd()
+  if (text.length === 0) return ""
+  return from > 0 ? `...${text}` : text
+}
+
 // ---------------------------------------------------------------------------
-// Listener state. Every listener watches one job. The .exit file fires once and
-// retires the listener; the .drip file may fire many spikes over the job's life.
+// Listener state. Every listener watches one job. The exit file fires once and
+// retires the listener; the drip file may fire many spikes over the job's life.
 // A finished job needs no re-arm and no ack.
 // ---------------------------------------------------------------------------
 
 type Listener = {
   sessionID: string // which session to wake; captured from ToolContext
-  base: string // job_FOO path stem; identifies the job in every turn
+  id: string // short conversational identity; also the artifact dir name
   exit: string // the one-shot exit-code file we watch
   out: string // captured stdout path (reported by size)
   err: string // captured stderr path (reported by size)
   drip: string // append-only afferent fiber the job writes interim events to
-  pgid: number // process-group id == child.pid; kill handle + listener key
+  pgid: number // process-group id == child.pid; kill handle
   // Drip cursor (temporal-summation state):
   dripOffset: number // bytes already fired as spikes
   dripSeen: number // file size at the previous tick; growth resets the window
@@ -137,12 +155,17 @@ const POLL_MS = 300
 // ---------------------------------------------------------------------------
 
 type PerkState = {
-  listeners: Map<number, Listener> // keyed by pgid
-  jobs: Set<number> // tracked PGIDs, group-killed on dispose
+  listeners: Map<string, Listener> // keyed by stable job id, not reusable PGID
   inject: ((sessionID: string, message: string) => Promise<void>) | null
   pollStarted: boolean
+  sweepStarted: boolean
 }
 
+// State lives on globalThis because opencode may instantiate the plugin more than
+// once in one process. Note the failure mode: if you change the PerkState /
+// Listener shape mid-development, an old in-memory instance's poll loop can
+// iterate the new shape and misfire (undefined ids, per-tick re-injection).
+// Restart opencode after any state-shape change so only one build is live.
 const GLOBAL_KEY = "__perk_state__"
 
 function getState(): PerkState {
@@ -150,9 +173,9 @@ function getState(): PerkState {
   if (!g[GLOBAL_KEY]) {
     g[GLOBAL_KEY] = {
       listeners: new Map(),
-      jobs: new Set(),
       inject: null,
       pollStarted: false,
+      sweepStarted: false,
     } satisfies PerkState
   }
   return g[GLOBAL_KEY] as PerkState
@@ -160,18 +183,29 @@ function getState(): PerkState {
 
 // Logging: NEVER write to stdout/stderr. When perk runs inside the opencode
 // TUI, the renderer owns that surface and our writes corrupt the display.
-// Append to a file instead. Opt out / redirect via PERK_LOG (set to "" or "off"
-// to silence). Failures here are swallowed: logging must never break the
-// channel.
+// Append to a file instead. Logging is off by default. PERK_LOG=1 writes beside
+// the spool; any other non-empty value is an explicit path. Failures here are
+// swallowed: logging must never break the channel.
+const OPENCODE_TMP_DIR = join(tmpdir(), "opencode")
+const SPOOL_DIR = join(OPENCODE_TMP_DIR, "perk")
+const LOG_SETTING = process.env.PERK_LOG
 const LOG_PATH =
-  process.env.PERK_LOG === undefined ? "/tmp/perk.log" : process.env.PERK_LOG
+  !LOG_SETTING || LOG_SETTING === "off"
+    ? ""
+    : LOG_SETTING === "1"
+      ? join(SPOOL_DIR, "log")
+      : LOG_SETTING
 const log = (...a: unknown[]) => {
-  if (!LOG_PATH || LOG_PATH === "off") return
+  if (!LOG_PATH) return
   try {
+    if (LOG_SETTING === "1") ensureSpoolDir()
     const line = a
       .map((x) => (typeof x === "string" ? x : JSON.stringify(x)))
       .join(" ")
-    appendFileSync(LOG_PATH, `${new Date().toISOString()} [perk] ${line}\n`)
+    appendFileSync(LOG_PATH, `${new Date().toISOString()} [perk] ${line}\n`, {
+      mode: 0o600,
+    })
+    chmodSync(LOG_PATH, 0o600)
   } catch {
     // never let logging break the channel
   }
@@ -184,11 +218,11 @@ function startPoll(S: PerkState) {
     // Turns fired this tick, in order. Drip spikes are appended before the
     // terminal exit turn for the same job, so an agent reading the transcript
     // sees a job's interim spikes precede its exit. Every turn names its job
-    // (l.base) so interleaved streams from concurrent jobs stay disambiguable.
+    // (l.id) so interleaved streams from concurrent jobs stay disambiguable.
     const fired: { sessionID: string; message: string }[] = []
 
     for (const l of S.listeners.values()) {
-      // --- Afferent fiber: temporal summation over the .drip file ----------
+      // --- Afferent fiber: temporal summation over the drip file -----------
       // Compare the file's current size to its size last tick. While it is
       // still GROWING we withhold (the burst hasn't settled). Once it stops
       // growing for one refractory window (a single poll interval) AND there
@@ -207,14 +241,14 @@ function startPoll(S: PerkState) {
           log("spike", { pgid: l.pgid, bytes: chunk.length })
           fired.push({
             sessionID: l.sessionID,
-            message: `Spike from background job ${l.base}:\n${chunk.trimEnd()}`,
+            message: `Spike from job ${l.id}:\n${chunk.trimEnd()}`,
           })
         }
       }
 
       // --- Exit: the one-shot terminal signal ------------------------------
       // The exit file is written last, atomically, only when the job is done
-      // and .out/.err are complete. A successful read is the completion signal.
+      // and out/err are complete. A successful read is the completion signal.
       // An absent/unreadable file means not-done-yet; skip and poll again.
       let code: string
       try {
@@ -232,17 +266,24 @@ function startPoll(S: PerkState) {
         log("spike (final)", { pgid: l.pgid, bytes: finalDrip.length })
         fired.push({
           sessionID: l.sessionID,
-          message: `Spike from background job ${l.base}:\n${finalDrip.trimEnd()}`,
+          message: `Spike from job ${l.id}:\n${finalDrip.trimEnd()}`,
         })
       }
 
-      const message =
-        `Background job ${l.base} exited = ${code}, ` +
-        `.out ${size(l.out)} bytes, .err ${size(l.err)} bytes`
+      const errBytes = size(l.err)
+      let message =
+        `Job ${l.id} exited ${code}: ` +
+        `out ${size(l.out)} bytes, err ${errBytes} bytes`
+      // On failure, fold a stderr tail into the turn so the cause is legible
+      // here (not only by separately reading err). The classic case: a prose
+      // first line the detached subshell tried to run as a command.
+      if (code !== "0" && errBytes > 0) {
+        const snippet = tail(l.err, 800)
+        if (snippet.length > 0) message += `\nerr tail:\n${snippet}`
+      }
       log("fired", { pgid: l.pgid, code })
       fired.push({ sessionID: l.sessionID, message })
-      S.listeners.delete(l.pgid)
-      S.jobs.delete(l.pgid) // finished; nothing left to reap
+      S.listeners.delete(l.id)
     }
 
     if (fired.length === 0) return
@@ -269,29 +310,93 @@ function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-// Per-job private file set under the project .perk/ dir. The agent learns the
-// path expression (job_FOO.{out,err,exit}) from the tool's return value. Using
-// the project dir (not /tmp) avoids opencode's external-directory permission
-// prompt on access outside the worktree.
+// Per-job private directory under opencode's allowlisted temporary directory.
+// This keeps projects clean while letting built-in file tools inspect captures
+// without an external-directory prompt.
 type JobFiles = {
-  base: string
+  id: string
+  dir: string
   exit: string
   out: string
   err: string
   drip: string
 }
 
-function makeJobFiles(worktree: string): JobFiles {
-  const dir = join(worktree, ".perk")
-  mkdirSync(dir, { recursive: true })
-  const base = join(dir, `job_${randomBytes(4).toString("hex")}`)
-  return {
-    base,
-    exit: `${base}.exit`,
-    out: `${base}.out`,
-    err: `${base}.err`,
-    drip: `${base}.drip`,
+function ensureSpoolDir() {
+  mkdirSync(OPENCODE_TMP_DIR, { recursive: true, mode: 0o700 })
+  const parent = lstatSync(OPENCODE_TMP_DIR)
+  if (!parent.isDirectory() || parent.isSymbolicLink()) {
+    throw new Error(`Unsafe opencode temporary path: ${OPENCODE_TMP_DIR}`)
   }
+  if (typeof process.getuid === "function" && parent.uid !== process.getuid()) {
+    throw new Error(`Opencode temporary path is owned by another user: ${OPENCODE_TMP_DIR}`)
+  }
+  mkdirSync(SPOOL_DIR, { recursive: true, mode: 0o700 })
+  const info = lstatSync(SPOOL_DIR)
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`Unsafe perk spool path: ${SPOOL_DIR}`)
+  }
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error(`Perk spool is owned by another user: ${SPOOL_DIR}`)
+  }
+  chmodSync(SPOOL_DIR, 0o700)
+}
+
+function makeJobFiles(): JobFiles {
+  ensureSpoolDir()
+  for (;;) {
+    const id = randomBytes(4).toString("hex")
+    const dir = join(SPOOL_DIR, id)
+    try {
+      mkdirSync(dir, { mode: 0o700 })
+      const drip = join(dir, "drip")
+      closeSync(openSync(drip, "wx", 0o600))
+      return {
+        id,
+        dir,
+        exit: join(dir, "exit"),
+        out: join(dir, "out"),
+        err: join(dir, "err"),
+        drip,
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue
+      rmSync(dir, { recursive: true, force: true })
+      throw error
+    }
+  }
+}
+
+const RETENTION_MS = 24 * 60 * 60 * 1000
+const SWEEP_MS = 60 * 60 * 1000
+
+function sweepCompletedJobs() {
+  const cutoff = Date.now() - RETENTION_MS
+  let entries
+  try {
+    entries = readdirSync(SPOOL_DIR, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[0-9a-f]{8}$/.test(entry.name)) continue
+    const dir = join(SPOOL_DIR, entry.name)
+    try {
+      if (statSync(join(dir, "exit")).mtimeMs >= cutoff) continue
+      rmSync(dir, { recursive: true, force: true })
+      log("swept", { id: entry.name })
+    } catch {
+      // No readable exit means active or abandoned: never guess and delete it.
+    }
+  }
+}
+
+function startSweep(S: PerkState) {
+  if (S.sweepStarted) return
+  S.sweepStarted = true
+  sweepCompletedJobs()
+  const timer = setInterval(sweepCompletedJobs, SWEEP_MS)
+  if (typeof timer.unref === "function") timer.unref()
 }
 
 // Build the shell script the detached child runs. Run the user command in a
@@ -309,10 +414,19 @@ function makeJobFiles(worktree: string): JobFiles {
 // trailing `#` comment, and a `#` runs to end-of-LINE; if `( <command> )` were
 // one line, a comment would swallow the closing `)`. Putting the command on its
 // own line between a lone `(` and `)` means any comment dies at the newline.
+//
+// The subshell runs under `set -e`: the user's command body is executed
+// abort-on-error, so the FIRST failing line ends the job with a nonzero code
+// instead of being silently stepped over (the classic trap: a bare descriptive
+// first line that the shell tries to run, then continues, letting a later
+// success mask the failure with exit 0). A line that is EXPECTED to fail must
+// opt out the normal shell way, e.g. `somecmd || true`.
 function backgroundScript(command: string, f: JobFiles): string {
   return [
+    "umask 077",
     `export PERK_DRIP=${shSingleQuote(f.drip)}`,
     "(",
+    `set -e`,
     command,
     `) >${shSingleQuote(f.out)} 2>${shSingleQuote(f.err)}`,
     `__perk_code=$?`,
@@ -324,14 +438,19 @@ function backgroundScript(command: string, f: JobFiles): string {
 // Spawn the detached job. Returns the PGID (== child.pid, because detached
 // makes the child a process-group leader). The caller tracks it for dispose
 // reaping and hands it to the agent as a kill handle.
-function spawnBackground(command: string, f: JobFiles, cwd: string): number {
-  const child = spawn("sh", ["-c", backgroundScript(command, f)], {
-    cwd,
-    detached: true,
-    stdio: "ignore",
+function spawnBackground(command: string, f: JobFiles, cwd: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("sh", ["-c", backgroundScript(command, f)], {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+    })
+    child.once("spawn", () => {
+      child.unref()
+      resolve(child.pid!)
+    })
+    child.once("error", reject)
   })
-  child.unref()
-  return child.pid!
 }
 
 // Group-kill a tracked job tree. Negative PID signals the whole process group,
@@ -357,17 +476,18 @@ export const Perk: Plugin = async ({ client }) => {
   }
 
   startPoll(S)
+  startSweep(S)
 
   const hooks = {
     // Reap every tracked job on shutdown so jobs die with opencode on a graceful
     // exit (confirmed: dispose fires on `opencode run` teardown). A hard crash /
     // kill -9 of opencode bypasses this; the returned PGID is the manual remedy.
     dispose: async () => {
-      for (const pgid of S.jobs) {
-        const ok = killJob(pgid)
-        log("dispose reap", { pgid, ok })
+      for (const job of S.listeners.values()) {
+        const ok = killJob(job.pgid)
+        log("dispose reap", { id: job.id, pgid: job.pgid, ok })
       }
-      S.jobs.clear()
+      S.listeners.clear()
     },
 
     tool: {
@@ -378,7 +498,8 @@ export const Perk: Plugin = async ({ client }) => {
           "bash: that one blocks until the command exits and hands you its " +
           "output; this one returns IMMEDIATELY (before the command finishes) " +
           "so you keep control of your turn. perk captures stdout/stderr/exit " +
-          "code to files under the project .perk/ dir and watches the exit " +
+          "code in a private job directory under opencode's temporary dir and " +
+          "watches the exit " +
           "file, which is written ONLY when the job is truly done (its output " +
           "files are complete first), making it a sound completion gate. On " +
           "completion perk injects a turn reporting the exit code and the byte " +
@@ -389,7 +510,7 @@ export const Perk: Plugin = async ({ client }) => {
           "redirection or choose output paths; perk handles detachment and " +
           "capture. What lands in your transcript is exactly the command you " +
           "typed. The tool returns the capture path expression " +
-          "(.perk/job_FOO.{out,err,exit}) and the job's pid. " +
+          "(<job-dir>/{out,err,drip,exit}) and the job's pgid. " +
           "STREAMING (drip): a still-running job can push interim events back " +
           "to you WITHOUT re-arming a new job by appending to the file named in " +
           "$PERK_DRIP (set automatically inside the job), e.g. " +
@@ -401,10 +522,10 @@ export const Perk: Plugin = async ({ client }) => {
           "delivered separately; no framing protocol needed). This makes one " +
           "bash_background call a continuous incoming stream: zero or more " +
           "spike turns while it runs, then one exit turn when it ends. Every " +
-          "injected turn names its job (job_FOO) so you can disambiguate " +
+          "injected turn names its short job ID so you can disambiguate " +
           "interleaved streams from concurrent jobs. " +
           "KILL a job (e.g. a preview server or a long-lived watcher) with " +
-          "`kill -TERM -<pid>` (note " +
+          "`kill -TERM -<pgid>` (note " +
           "the leading minus: it signals the whole process group). Jobs also " +
           "die automatically when opencode shuts down gracefully. " +
           "WAKING: if a human is present (interactive), end your turn and go " +
@@ -413,7 +534,7 @@ export const Perk: Plugin = async ({ client }) => {
           "exits the process and the wake lands in nothing, so instead block in " +
           "FOREGROUND bash on the returned exit file: " +
           "`until [ -e <exit-file> ]; do sleep 0.3; done` then read it (and " +
-          "`cat` the .drip file for any interim events).",
+          "the drip file for any interim events).",
         args: {
           command: tool.schema
             .string()
@@ -421,16 +542,25 @@ export const Perk: Plugin = async ({ client }) => {
               "The shell command to run in the background (just the work, e.g. " +
                 "'make build' or 'npm run dev'). No nohup/&/disown/redirection " +
                 "and no output paths; perk adds detachment and captures " +
-                "stdout/stderr for you. May be multi-line and may contain # " +
-                "comments.",
+                "stdout/stderr for you. May be multi-line; EVERY line is " +
+                "executed as shell under `set -e` (abort on first error), so a " +
+                "comment needs a literal leading `#`, a bare descriptive line " +
+                "(a human-style label) will be run and fail the job, and a line " +
+                "you EXPECT to fail must opt out with `|| true`.",
             ),
         },
         async execute(args, ctx) {
-          const f = makeJobFiles(ctx.directory)
-          const pgid = spawnBackground(args.command, f, ctx.directory)
-          S.listeners.set(pgid, {
+          const f = makeJobFiles()
+          let pgid: number
+          try {
+            pgid = await spawnBackground(args.command, f, ctx.directory)
+          } catch (error) {
+            rmSync(f.dir, { recursive: true, force: true })
+            throw error
+          }
+          S.listeners.set(f.id, {
             sessionID: ctx.sessionID,
-            base: f.base,
+            id: f.id,
             exit: f.exit,
             out: f.out,
             err: f.err,
@@ -439,15 +569,17 @@ export const Perk: Plugin = async ({ client }) => {
             dripOffset: 0,
             dripSeen: 0,
           })
-          S.jobs.add(pgid)
           log("bash_background: spawned", {
+            id: f.id,
             pgid,
-            base: f.base,
+            dir: f.dir,
             cwd: ctx.directory,
           })
           return (
-            `Backgrounded (detached, pid ${pgid}). ` +
-            `Output captured to ${f.base}.{out,err,exit,drip}.`
+            `Backgrounded ${f.id} (detached, pgid ${pgid}). ` +
+            `Files: ${f.dir}/{out,err,drip,exit}. ` +
+            `To kill the whole job tree: kill -TERM -${pgid} ` +
+            `(the leading minus targets the process group; do not drop it).`
           )
         },
       }),

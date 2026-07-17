@@ -27,18 +27,17 @@ is itself a finding to report, not a gap for this file to paper over.
 
 - Be in a **fresh opencode session**. Plugin tools only reach the model when the
   tool list is built; a stale session predating the plugin load may not offer
-  `bash_background`. If the tool seems inert in a confirmed-fresh session,
-  check `/tmp/perk.log` for load errors before calling it a test failure.
-- `bash_background` auto-generates its capture files under the project
-  `.perk/` dir; you never choose paths. For any *public* rendezvous file you
-  create yourself, also use `.perk/` (e.g. `.perk/rendezvous-x.done`) to stay
-  inside the worktree and avoid opencode's out-of-worktree permission prompt.
+  `bash_background`.
+- `bash_background` auto-generates a private job directory under
+  `os.tmpdir()/opencode/perk/` (normally `$TMPDIR/opencode/perk/` on macOS); you
+  never choose paths. OpenCode permits its file tools to access this temp
+  subtree without an external-directory prompt.
 - **A job must outlast one of your turns** to test the wake. Per-turn latency
   (model thinking + tool round-trips) can be ~10s. Use **`sleep 20`** as the
   canonical delay: long enough that you genuinely go idle before it finishes.
-- Plugin logs go to `/tmp/perk.log` (never the terminal: stderr would corrupt
-  the TUI). `tail -f /tmp/perk.log` in another shell to watch `spawned` /
-  `spike` / `fired` / `dispose reap` events. `PERK_LOG=off` silences.
+- Runtime logging is off by default. To debug, start opencode with `PERK_LOG=1`;
+  logs then go to the spool's `log` file (never the terminal: stderr would
+  corrupt the TUI).
 
 ---
 
@@ -76,8 +75,9 @@ exit 3
 End your turn.
 
 **Pass:** the wake reports exit code 3 **and** nonzero byte sizes for both
-stdout and stderr, with their `.perk/` paths. Reading the named files shows the
-two lines. (The tool chose and reported the paths; you did not pass any.)
+stdout and stderr. Reading the returned `out` and `err` paths shows the two
+lines, with no external-directory permission prompt. The tool chose and
+reported the paths; you did not pass any.
 
 ---
 
@@ -117,10 +117,10 @@ whole job tree.
 There is no rendezvous argument: perk auto-generates its own private files. If
 you want a *public* file another observer can wait on, write it yourself in the
 command body. Call `bash_background` with
-`command` = `sleep 20; touch .perk/rendezvous-6.done`, and in a **separate,
-foreground `bash`** call block on it:
+`command` = `sleep 20; touch "$(dirname "$PERK_DRIP")/rendezvous"`, note the
+returned job directory, and in a **separate, foreground `bash`** call block on:
 ```bash
-until [ -e .perk/rendezvous-6.done ]; do sleep 1; done; echo seen
+until [ -e <job-dir>/rendezvous ]; do sleep 1; done; echo seen
 ```
 
 **Pass:** the second call eventually prints `seen`. (A perk wake for the job's
@@ -177,12 +177,10 @@ never lost even when written shortly before exit.
 
 ## Cleanup
 
-```bash
-rm -rf .perk      # removes all per-job capture files and any rendezvous files
-```
-
-The whole `.perk/` dir is gitignored. Kill any jobs you started and did not let
-finish via `kill -TERM -<pgid>`.
+Completed job directories expire automatically after 24 hours. To clean up
+immediately, remove only the returned directories for jobs that have finished;
+do not remove the shared spool root while other sessions may be using it. Kill
+any jobs you started and did not let finish via `kill -TERM -<pgid>`.
 
 ---
 
@@ -191,7 +189,7 @@ finish via `kill -TERM -<pgid>`.
 - Did the tool's own description give you enough to use it correctly on the first
   try, or did something surprise you mid-test? **Name the surprise.** (This is
   the primary signal: the protocol withholds the mechanism on purpose.)
-- Was the wake verdict (clean / exit code N; stdout/stderr byte sizes + paths)
+- Was the wake verdict (clean / exit code N; stdout/stderr byte sizes)
   unambiguous?
 - Was the interactive-vs-headless guidance (end your turn vs. foreground
   until-loop) clear from the tool's return value alone?
