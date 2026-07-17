@@ -77,7 +77,8 @@ End your turn.
 **Pass:** the wake reports exit code 3 **and** nonzero byte sizes for both
 stdout and stderr. Reading the returned `out` and `err` paths shows the two
 lines, with no external-directory permission prompt. The tool chose and
-reported the paths; you did not pass any.
+reported the paths; you did not pass any. The wake itself does **not** include
+`uh oh`: stderr contents remain local unless you explicitly read the file.
 
 ---
 
@@ -104,13 +105,18 @@ for the same job may also arrive; both observers are valid.)
 ## Test 5: kill via pgid
 
 1. Call `bash_background` with `command` = `sleep 120`. Note the **pgid** it
-   returns.
+   returns, along with its exit-file path.
 2. In a `bash` call, kill the whole group: `kill -TERM -<pgid>` (leading minus).
-3. Verify it is gone: `ps -eo pid,command | grep "[s]leep 120" || echo REAPED`.
+3. In that same call, wait for the terminal gate and inspect it:
+   `until [ -e <exit-file> ]; do sleep 0.1; done; cat <exit-file>`.
+4. Verify the process is gone:
+   `ps -eo pid,command | grep "[s]leep 120" || echo REAPED`.
 
-**Pass:** the kill succeeds and the check prints `REAPED` (no surviving
-`sleep 120`). This proves the returned pgid is a working kill handle for the
-whole job tree.
+**Pass:** the gate contains `cancelled:TERM`, and the process check prints
+`REAPED` (no surviving `sleep 120`). An interactive session also receives a
+cancellation turn. This proves the returned pgid is a working kill handle for
+the whole job tree and that foreground waiters cannot be stranded by the
+documented cancellation path.
 
 ## Test 6: explicit public rendezvous (optional)
 
@@ -173,6 +179,37 @@ Call `bash_background` with `command` =
 5, with the spike ordered before the exit turn. This confirms a drip tail is
 never lost even when written shortly before exit.
 
+## Test 10: split UTF-8 character (optional)
+
+Call `bash_background` with:
+```
+printf '\342' >> "$PERK_DRIP"
+sleep 1
+printf '\202\254\n' >> "$PERK_DRIP"
+sleep 2
+```
+End your turn. The two writes are the three UTF-8 bytes of `€`, deliberately
+split after the first byte and far enough apart for perk to read the prefix.
+
+**Pass:** one spike contains `€`, with no replacement character and no empty
+spike from the incomplete prefix.
+
+## Test 11: replaced drip is diagnosed (optional)
+
+Call `bash_background` with:
+```
+printf 'before\n' >> "$PERK_DRIP"
+sleep 2
+mv "$PERK_DRIP" "$PERK_DRIP.old"
+printf 'after\n' > "$PERK_DRIP"
+sleep 2
+```
+End your turn.
+
+**Pass:** `before` arrives, replacement produces an explicit diagnostic spike,
+and `after` arrives from the new file. Replacement is not supported framing; the
+test verifies that violating the append-only contract is visible and coherent.
+
 ---
 
 ## Cleanup
@@ -198,6 +235,8 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
   write to `$PERK_DRIP`, that quiet gaps separate spikes (and bursts coalesce),
   and that each spike turn names its job? Did the coalescing behave as you
   expected, or did the segmentation surprise you?
+- Did cancellation publish `cancelled:TERM` and resolve the same exit-file gate
+  used for normal completion?
 - Anything about `bash_background` (its single `command` arg with no paths
   to choose; the command recorded verbatim in your own tool call, *not* echoed
   back in the wake; capture reported by size + path; the immediate return; the
@@ -214,4 +253,4 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
 - A working kill handle for the whole job tree (Test 5).
 - A continuous drip stream from one job: interim spikes delivered while running,
   coalesced by quiet gaps, each identifying its job, with the tail never lost on
-  exit (Tests 7, 8, 9).
+  exit and split UTF-8 preserved (Tests 7–10).

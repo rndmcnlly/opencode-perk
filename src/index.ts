@@ -60,6 +60,7 @@ import { spawn } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
+import { StringDecoder } from "node:string_decoder"
 
 // ---------------------------------------------------------------------------
 // Sense organs. perk watches two files per job:
@@ -91,37 +92,46 @@ function size(path: string): number {
   }
 }
 
-// Read the byte range [from, to) of a file as utf8. Used to pull only the
-// not-yet-fired tail of a drip file each time it settles, so perk never
-// re-reads or re-fires bytes it has already turned into a spike. A ranged read
-// (open/read/close) avoids slurping the whole growing file every tick.
-function readRange(path: string, from: number, to: number): string {
+// Read up to the byte range [from, to). The caller advances its cursor by the
+// returned byte count, never by the requested count, so a short or failed read
+// cannot silently discard drip data. Decoding happens separately through a
+// stateful StringDecoder, which preserves UTF-8 sequences split across reads.
+function readRange(path: string, from: number, to: number): Buffer {
   const len = to - from
-  if (len <= 0) return ""
+  if (len <= 0) return Buffer.alloc(0)
   let fd: number | undefined
   try {
     fd = openSync(path, "r")
     const buf = Buffer.allocUnsafe(len)
-    const n = readSync(fd, buf, 0, len, from)
-    return buf.toString("utf8", 0, n)
+    let n = 0
+    while (n < len) {
+      const read = readSync(fd, buf, n, len - n, from + n)
+      if (read === 0) break
+      n += read
+    }
+    return buf.subarray(0, n)
   } catch {
-    return ""
+    return Buffer.alloc(0)
   } finally {
-    if (fd !== undefined) closeSync(fd)
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // A close failure must not stop the poll loop.
+      }
+    }
   }
 }
 
-// Read the last `max` bytes of a file as utf8 (a tail snippet). Used to fold a
-// failing job's stderr into its exit turn so a dead-on-arrival command (e.g. a
-// prose first line the subshell tried to run, or any command-not-found) is
-// legible in the conversation itself, not only by separately reading err.
-function tail(path: string, max: number): string {
-  const total = size(path)
-  if (total <= 0) return ""
-  const from = total > max ? total - max : 0
-  const text = readRange(path, from, total).trimEnd()
-  if (text.length === 0) return ""
-  return from > 0 ? `...${text}` : text
+type FileState = { size: number; identity: string }
+
+function fileState(path: string): FileState | null {
+  try {
+    const stat = statSync(path)
+    return { size: stat.size, identity: `${stat.dev}:${stat.ino}` }
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +151,8 @@ type Listener = {
   // Drip cursor (temporal-summation state):
   dripOffset: number // bytes already fired as spikes
   dripSeen: number // file size at the previous tick; growth resets the window
+  dripIdentity: string // device/inode pair; detects replacement of the fiber
+  dripDecoder: StringDecoder // retains a UTF-8 prefix split across poll reads
 }
 
 const POLL_MS = 300
@@ -229,16 +241,36 @@ function startPoll(S: PerkState) {
       // are unfired bytes, we sum that tail into one spike and advance the
       // cursor. Bytes spaced more than a window apart therefore fire as
       // separate spikes; bytes within a window coalesce into one.
-      const dripSize = size(l.drip)
+      const currentDrip = fileState(l.drip)
+      let dripSize = currentDrip?.size ?? 0
+      if (
+        currentDrip &&
+        (currentDrip.identity !== l.dripIdentity || dripSize < l.dripOffset)
+      ) {
+        // The public contract is append-only. If a command violates it, reset
+        // coherently and tell the conversation rather than silently dropping,
+        // duplicating, or decoding bytes against stale UTF-8 state.
+        l.dripIdentity = currentDrip.identity
+        l.dripOffset = 0
+        l.dripSeen = 0
+        l.dripDecoder = new StringDecoder("utf8")
+        fired.push({
+          sessionID: l.sessionID,
+          message:
+            `Spike from job ${l.id}:\n` +
+            `[perk: drip file was truncated or replaced; decoding restarted]`,
+        })
+      }
       if (dripSize > l.dripSeen) {
         // Still growing: arm/extend the window, fire nothing yet.
         l.dripSeen = dripSize
       } else if (dripSize > l.dripOffset) {
         // Settled with unfired bytes: fire a spike carrying the new tail.
-        const chunk = readRange(l.drip, l.dripOffset, dripSize)
-        l.dripOffset = dripSize
-        if (chunk.length > 0) {
-          log("spike", { pgid: l.pgid, bytes: chunk.length })
+        const bytes = readRange(l.drip, l.dripOffset, dripSize)
+        l.dripOffset += bytes.length
+        const chunk = l.dripDecoder.write(bytes)
+        if (chunk.trim().length > 0) {
+          log("spike", { pgid: l.pgid, bytes: bytes.length })
           fired.push({
             sessionID: l.sessionID,
             message: `Spike from job ${l.id}:\n${chunk.trimEnd()}`,
@@ -261,9 +293,32 @@ function startPoll(S: PerkState) {
       // written and then the process exited within the same window, so the
       // grow/settle dance never got a quiet tick) as its OWN spike, before the
       // terminal turn. This guarantees no drip byte is ever dropped on exit.
-      const finalDrip = readRange(l.drip, l.dripOffset, size(l.drip))
+      const finalState = fileState(l.drip)
+      if (
+        finalState &&
+        (finalState.identity !== l.dripIdentity || finalState.size < l.dripOffset)
+      ) {
+        l.dripIdentity = finalState.identity
+        l.dripOffset = 0
+        l.dripDecoder = new StringDecoder("utf8")
+        fired.push({
+          sessionID: l.sessionID,
+          message:
+            `Spike from job ${l.id}:\n` +
+            `[perk: drip file was truncated or replaced; decoding restarted]`,
+        })
+      }
+      const finalSize = finalState?.size ?? 0
+      const finalBytes = readRange(l.drip, l.dripOffset, finalSize)
+      l.dripOffset += finalBytes.length
+      // An exit file says the writer is done. If a transient read still came up
+      // short, retain the listener and retry rather than losing the terminal
+      // tail or firing the exit turn ahead of it.
+      if (l.dripOffset < finalSize) continue
+      const finalDrip =
+        l.dripDecoder.write(finalBytes) + l.dripDecoder.end()
       if (finalDrip.trim().length > 0) {
-        log("spike (final)", { pgid: l.pgid, bytes: finalDrip.length })
+        log("spike (final)", { pgid: l.pgid, bytes: finalBytes.length })
         fired.push({
           sessionID: l.sessionID,
           message: `Spike from job ${l.id}:\n${finalDrip.trimEnd()}`,
@@ -271,16 +326,12 @@ function startPoll(S: PerkState) {
       }
 
       const errBytes = size(l.err)
-      let message =
-        `Job ${l.id} exited ${code}: ` +
+      const outcome = code.startsWith("cancelled:")
+        ? `cancelled by ${code.slice("cancelled:".length) || "signal"}`
+        : `exited ${code}`
+      const message =
+        `Job ${l.id} ${outcome}: ` +
         `out ${size(l.out)} bytes, err ${errBytes} bytes`
-      // On failure, fold a stderr tail into the turn so the cause is legible
-      // here (not only by separately reading err). The classic case: a prose
-      // first line the detached subshell tried to run as a command.
-      if (code !== "0" && errBytes > 0) {
-        const snippet = tail(l.err, 800)
-        if (snippet.length > 0) message += `\nerr tail:\n${snippet}`
-      }
       log("fired", { pgid: l.pgid, code })
       fired.push({ sessionID: l.sessionID, message })
       S.listeners.delete(l.id)
@@ -320,6 +371,7 @@ type JobFiles = {
   out: string
   err: string
   drip: string
+  dripIdentity: string
 }
 
 function ensureSpoolDir() {
@@ -351,6 +403,7 @@ function makeJobFiles(): JobFiles {
       mkdirSync(dir, { mode: 0o700 })
       const drip = join(dir, "drip")
       closeSync(openSync(drip, "wx", 0o600))
+      const dripIdentity = fileState(drip)!.identity
       return {
         id,
         dir,
@@ -358,6 +411,7 @@ function makeJobFiles(): JobFiles {
         out: join(dir, "out"),
         err: join(dir, "err"),
         drip,
+        dripIdentity,
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") continue
@@ -401,9 +455,10 @@ function startSweep(S: PerkState) {
 
 // Build the shell script the detached child runs. Run the user command in a
 // SUBSHELL (so a bare `exit N` ends only the job), redirect its stdout/stderr to
-// the capture files, then write the bare exit code to the exit file ATOMICALLY
-// (temp + rename) so a foreground `until [ -e exit ]` waiter never observes a
-// half-written file.
+// the capture files, then write the exit code to the exit file ATOMICALLY (temp
+// + rename) so a foreground `until [ -e exit ]` waiter never observes a
+// half-written file. The outer wrapper traps cooperative termination signals
+// and publishes `cancelled:<signal>` through the same terminal gate.
 //
 // The subshell also inherits $PERK_DRIP, the path to this job's append-only drip
 // file. A long-running job can `echo ... >> "$PERK_DRIP"` (or `printf`, or
@@ -424,14 +479,21 @@ function startSweep(S: PerkState) {
 function backgroundScript(command: string, f: JobFiles): string {
   return [
     "umask 077",
+    "__perk_finish() {",
+    "  trap '' HUP INT TERM",
+    `  printf '%s\\n' "$1" > ${shSingleQuote(f.exit + ".tmp")}`,
+    `  mv ${shSingleQuote(f.exit + ".tmp")} ${shSingleQuote(f.exit)}`,
+    "}",
+    `trap '__perk_finish "cancelled:HUP"; exit 129' HUP`,
+    `trap '__perk_finish "cancelled:INT"; exit 130' INT`,
+    `trap '__perk_finish "cancelled:TERM"; exit 143' TERM`,
     `export PERK_DRIP=${shSingleQuote(f.drip)}`,
     "(",
     `set -e`,
     command,
     `) >${shSingleQuote(f.out)} 2>${shSingleQuote(f.err)}`,
     `__perk_code=$?`,
-    `echo "$__perk_code" > ${shSingleQuote(f.exit + ".tmp")}`,
-    `mv ${shSingleQuote(f.exit + ".tmp")} ${shSingleQuote(f.exit)}`,
+    `__perk_finish "$__perk_code"`,
   ].join("\n")
 }
 
@@ -490,6 +552,14 @@ export const Perk: Plugin = async ({ client }) => {
       S.listeners.clear()
     },
 
+    // A nested `opencode run` inherits the outer job's PERK_DRIP. Mask it from
+    // that harness's foreground shell tools so they cannot accidentally write
+    // into the parent session. A real bash_background wrapper always exports
+    // its own job-local path after this environment is inherited.
+    "shell.env": async (_input: unknown, output: { env: Record<string, string> }) => {
+      output.env.PERK_DRIP = ""
+    },
+
     tool: {
       bash_background: tool({
         description:
@@ -526,8 +596,10 @@ export const Perk: Plugin = async ({ client }) => {
           "interleaved streams from concurrent jobs. " +
           "KILL a job (e.g. a preview server or a long-lived watcher) with " +
           "`kill -TERM -<pgid>` (note " +
-          "the leading minus: it signals the whole process group). Jobs also " +
-          "die automatically when opencode shuts down gracefully. " +
+          "the leading minus: it signals the whole process group). The wrapper " +
+          "publishes a cancelled:TERM terminal result, so exit-file waiters " +
+          "resolve after that documented kill path. Jobs also die " +
+          "automatically when opencode shuts down gracefully. " +
           "WAKING: if a human is present (interactive), end your turn and go " +
           "idle; perk injects spike/completion turns as they occur. If NO " +
           "human is present (headless, e.g. `opencode run`), ending your turn " +
@@ -568,6 +640,8 @@ export const Perk: Plugin = async ({ client }) => {
             pgid,
             dripOffset: 0,
             dripSeen: 0,
+            dripIdentity: f.dripIdentity,
+            dripDecoder: new StringDecoder("utf8"),
           })
           log("bash_background: spawned", {
             id: f.id,

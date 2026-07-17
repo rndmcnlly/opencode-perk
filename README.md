@@ -56,8 +56,10 @@ Two ingredients, both of which most harnesses already have:
    (below), tailed for interim events.
 
 When a job's exit file appears, perk injects a turn into the firing session
-describing the outcome (exit code, captured-output byte sizes). The wake
-text is generated, not canned. perk does not try to avoid landing a turn
+describing the outcome (exit code or cancellation, captured-output byte sizes).
+The wake text is generated, not canned. Captured stderr content remains local in
+the reported file and is never copied automatically into the conversation. perk
+does not try to avoid landing a turn
 mid-flight; an agent that cannot tolerate an interleaved notification should not
 be using perk.
 
@@ -79,7 +81,10 @@ history is zero-or-more spikes, then one terminal exit turn (any unfired drip
 tail is flushed as a final spike first, so no byte is dropped). Every injected
 turn names its job, so interleaved streams from concurrent jobs stay
 disambiguable. A job that never touches `$PERK_DRIP` behaves exactly as the
-one-shot original.
+one-shot original. Drip input is UTF-8 and append-only. perk preserves characters
+whose bytes straddle poll reads; if it observes truncation or file replacement,
+it emits a diagnostic spike and restarts decoding from the new file. Empty and
+whitespace-only writes are retained in the artifact but do not produce turns.
 
 ## Install (opencode)
 
@@ -123,7 +128,9 @@ stdout/stderr/exit-code to files for you. You end your turn and go idle; when th
 build exits, perk hands you a turn reporting the exit code and the byte sizes
 of the captured output, so you read the output files only if there
 is something worth reading. No polling, no blocked turn, no paths to invent, no
-hand-rolled backgrounding.
+hand-rolled backgrounding. In particular, stderr is not excerpted automatically:
+the byte count tells you whether the local `err` file is worth inspecting without
+disclosing its possibly sensitive contents to the conversation.
 
 Output and the exit code land under `os.tmpdir()/opencode/perk/` (normally
 `$TMPDIR/opencode/perk/` on macOS), which opencode allows its file tools to
@@ -179,6 +186,9 @@ segmentation purely by timing, with no delimiter protocol: write a multi-line
 block in one breath and it lands as one spike; `sleep` half a second between
 events you want delivered separately. Inspect what the agent will receive at any
 time with `tail -f <job-dir>/drip`, using the directory returned by the tool.
+Write UTF-8 by appending only. Whitespace-only appends do not fire; replacing or
+truncating the file is a contract violation that produces a diagnostic spike and
+resets decoding if perk observes it.
 
 Tear-down is unchanged: a long-lived streaming job (a watcher, a dev server) is
 killed with its pgid exactly as below.
@@ -196,7 +206,11 @@ kill -TERM -<pgid>      # leading minus = signal the whole process group
 
 This matters for long-lived jobs like preview/dev servers
 (`bash_background({ command: "npm run dev" })`): the agent gets a kill
-handle instead of an unstoppable orphan.
+handle instead of an unstoppable orphan. The wrapper catches cooperative
+`HUP`, `INT`, and `TERM` signals and atomically publishes a terminal marker such
+as `cancelled:TERM`. Interactive listeners receive a cancellation turn, and a
+foreground waiter on `exit` resolves. `SIGKILL` cannot be caught and therefore
+cannot provide this guarantee.
 
 Jobs also **die with opencode on a graceful shutdown.** The plugin tracks every
 running job and group-kills the survivors in its `dispose` hook, which opencode
@@ -228,6 +242,16 @@ session is still running after the agent stops.
   file is written only when the job is truly done (output files are flushed
   first, then the exit code is written atomically), so the loop is a correct
   completion gate. When it returns, read the captured output.
+
+When a job is stopped through the documented `kill -TERM -<pgid>` path, the same
+gate appears with `cancelled:TERM` rather than a numeric exit code, so this wait
+also resolves after cancellation.
+
+If an `opencode run` process itself was started inside a perk job, it inherits the
+outer job's environment. perk masks that inherited `$PERK_DRIP` from the nested
+harness's foreground shell calls; only a new `bash_background` wrapper exposes a
+job-local drip path. This prevents a nested agent from accidentally writing into
+its parent's stream.
 
 > **Caveat (poka-yoke gap):** the plugin cannot currently tell from its inputs
 > whether it is interactive or headless, so it cannot enforce this; it can only
