@@ -40,6 +40,7 @@
     "clean": "rm -rf dist",
     "test": "tsx --test test/*.test.ts",
     "check": "npm run build && npm test",
+    "refresh:opencode": "rm -rf \"${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/opencode-perk@latest\"",
     "prepack": "npm run clean && npm run build"
   },
   "peerDependencies": {

@@ -88,18 +88,35 @@ whitespace-only writes are retained in the artifact but do not produce turns.
 
 ## Install (opencode)
 
-**From npm (recommended).** Add the package to the `plugin` array in your
-`opencode.json` (project or global):
+**From npm (recommended).** Add the `latest` npm dist-tag to the `plugin`
+array in your `opencode.json` (project or global):
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-perk"]
+  "plugin": ["opencode-perk@latest"]
 }
 ```
 
 opencode installs it with Bun at startup and `bash_background` becomes available
 to the model. No build step on your end.
+
+### Updating the npm installation
+
+`@latest` expresses the intended update channel, but some OpenCode releases can
+retain an older resolved npm plugin in their per-plugin cache. When a new perk
+release is available, quit OpenCode, then remove only perk's cached resolution:
+
+```bash
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/opencode-perk@latest"
+```
+
+Restart OpenCode and it will install the current `latest` release. Maintainers
+working from this checkout can run the equivalent command with:
+
+```bash
+npm run refresh:opencode
+```
 
 **Drop-in single file (no config entry).** The npm package includes a generated
 single-file bundle with no runtime dependency beyond the OpenCode plugin SDK.
