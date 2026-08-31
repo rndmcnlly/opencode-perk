@@ -10,6 +10,8 @@ import {
 } from "./spool.js"
 
 export const POLL_MS = 300
+export const DEFAULT_COALESCE_SECONDS = 1
+export const MIN_COALESCE_SECONDS = 0.3
 
 export type JobHandle = { id: string; dir: string; pgid: number }
 
@@ -37,6 +39,7 @@ export class PerkRuntime {
     cwd: string,
     sessionID: string,
     inject: Injector,
+    coalesceSeconds = DEFAULT_COALESCE_SECONDS,
   ): Promise<JobHandle> {
     if (this.disposed) throw new Error("perk runtime is disposed")
     const files = makeJobFiles()
@@ -67,6 +70,8 @@ export class PerkRuntime {
       dripOffset: 0,
       dripSeen: 0,
       dripIdentity: files.dripIdentity,
+      dripChangedAt: null,
+      quietMs: Math.max(coalesceSeconds, MIN_COALESCE_SECONDS) * 1000,
     })
     log("bash_background: spawned", { id: files.id, pgid, dir: files.dir, cwd })
     return { id: files.id, dir: files.dir, pgid }

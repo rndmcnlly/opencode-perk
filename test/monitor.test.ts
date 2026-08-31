@@ -20,7 +20,7 @@ afterEach(() => {
   }
 })
 
-function fixture() {
+function fixture(quietMs = 1000) {
   const root = mkdtempSync(join(tmpdir(), "perk-monitor-test-"))
   roots.push(root)
   const files = makeJobFiles(join(root, "spool"))
@@ -29,7 +29,7 @@ function fixture() {
   const inject = async (_sessionID: string, message: string) => {
     messages.push(message)
   }
-  add(monitor, files, inject)
+  add(monitor, files, inject, quietMs)
   return { files, messages, monitor }
 }
 
@@ -37,6 +37,7 @@ function add(
   monitor: Monitor,
   files: JobFiles,
   inject: (sessionID: string, message: string) => Promise<void>,
+  quietMs = 1000,
 ) {
   monitor.add({
     inject,
@@ -50,20 +51,54 @@ function add(
     dripOffset: 0,
     dripSeen: 0,
     dripIdentity: files.dripIdentity,
+    dripChangedAt: null,
+    quietMs,
   })
 }
 
-test("a burst fires after one quiet tick", async () => {
+test("a burst fires after its configured quiet interval", async () => {
   const { files, messages, monitor } = fixture()
   appendFileSync(files.drip, "line a\nline b\n")
 
-  monitor.tick()
+  monitor.tick(100)
   await monitor.settled()
   assert.deepEqual(messages, [])
 
-  monitor.tick()
+  monitor.tick(1099)
+  await monitor.settled()
+  assert.deepEqual(messages, [])
+
+  monitor.tick(1100)
   await monitor.settled()
   assert.deepEqual(messages, [`Spike from job ${files.id}:\nline a\nline b`])
+})
+
+test("listeners can use different quiet intervals", async () => {
+  const root = mkdtempSync(join(tmpdir(), "perk-interval-test-"))
+  roots.push(root)
+  const fast = makeJobFiles(join(root, "spool"))
+  const slow = makeJobFiles(join(root, "spool"))
+  const messages: string[] = []
+  const monitor = new Monitor()
+  const inject = async (_sessionID: string, message: string) => {
+    messages.push(message)
+  }
+  add(monitor, fast, inject, 300)
+  add(monitor, slow, inject, 2000)
+  appendFileSync(fast.drip, "fast\n")
+  appendFileSync(slow.drip, "slow\n")
+
+  monitor.tick(0)
+  monitor.tick(300)
+  await monitor.settled()
+  assert.deepEqual(messages, [`Spike from job ${fast.id}:\nfast`])
+
+  monitor.tick(2000)
+  await monitor.settled()
+  assert.deepEqual(messages, [
+    `Spike from job ${fast.id}:\nfast`,
+    `Spike from job ${slow.id}:\nslow`,
+  ])
 })
 
 test("completion flushes final drip before the terminal event", async () => {
@@ -86,14 +121,14 @@ test("completion flushes final drip before the terminal event", async () => {
 test("UTF-8 split across settled reads is decoded once complete", async () => {
   const { files, messages, monitor } = fixture()
   appendFileSync(files.drip, Buffer.from([0xe2]))
-  monitor.tick()
-  monitor.tick()
+  monitor.tick(0)
+  monitor.tick(1000)
   await monitor.settled()
   assert.deepEqual(messages, [])
 
   appendFileSync(files.drip, Buffer.from([0x82, 0xac, 0x0a]))
-  monitor.tick()
-  monitor.tick()
+  monitor.tick(2000)
+  monitor.tick(3000)
   await monitor.settled()
   assert.deepEqual(messages, [`Spike from job ${files.id}:\n€`])
 })
@@ -103,8 +138,8 @@ test("replacing drip emits a diagnostic and reads the new fiber", async () => {
   renameSync(files.drip, `${files.drip}.old`)
   writeFileSync(files.drip, "after\n")
 
-  monitor.tick()
-  monitor.tick()
+  monitor.tick(0)
+  monitor.tick(1000)
   await monitor.settled()
 
   assert.deepEqual(messages, [

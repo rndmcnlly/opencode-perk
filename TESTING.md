@@ -174,7 +174,17 @@ a spike is delivered promptly while the job is still running (you are not made t
 wait for exit). **Fail:** three separate turns, or the lines do not arrive until
 the job exits.
 
-## Test 9: drip plus exit ordering (optional)
+## Test 9: a per-call interval changes segmentation
+
+Call `bash_background` with `coalesce_seconds` = `3` and `command` =
+`echo first >> "$PERK_DRIP"; sleep 1; echo second >> "$PERK_DRIP"; sleep 20`.
+End your turn.
+
+**Pass:** one spike containing both `first` and `second` arrives after the
+second write, rather than two spikes. Omitting `coalesce_seconds` uses `1.0`;
+values below the pinned `0.3` minimum are clamped to `0.3`.
+
+## Test 10: drip plus exit ordering (optional)
 
 Call `bash_background` with `command` =
 `echo "final note" >> "$PERK_DRIP"; sleep 2; exit 5`. End your turn.
@@ -183,7 +193,7 @@ Call `bash_background` with `command` =
 5, with the spike ordered before the exit turn. This confirms a drip tail is
 never lost even when written shortly before exit.
 
-## Test 10: split UTF-8 character (optional)
+## Test 11: split UTF-8 character (optional)
 
 Call `bash_background` with:
 ```
@@ -198,7 +208,7 @@ split after the first byte and far enough apart for perk to read the prefix.
 **Pass:** one spike contains `€`, with no replacement character and no empty
 spike from the incomplete prefix.
 
-## Test 11: replaced drip is diagnosed (optional)
+## Test 12: replaced drip is diagnosed (optional)
 
 Call `bash_background` with:
 ```
@@ -257,4 +267,4 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
 - A working kill handle for the whole job tree (Test 5).
 - A continuous drip stream from one job: interim spikes delivered while running,
   coalesced by quiet gaps, each identifying its job, with the tail never lost on
-  exit and split UTF-8 preserved (Tests 7–10).
+  exit and split UTF-8 preserved (Tests 7–12).

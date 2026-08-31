@@ -14,6 +14,8 @@ export type Listener = {
   dripOffset: number
   dripSeen: number
   dripIdentity: string
+  dripChangedAt: number | null
+  quietMs: number
   dripDecoder: StringDecoder
 }
 
@@ -40,7 +42,7 @@ export class Monitor {
 
   // One deterministic observation pass. Production supplies the interval;
   // tests call this directly to model growth, quiet windows, and completion.
-  tick() {
+  tick(now = Date.now()) {
     const fired: Fired[] = []
 
     for (const listener of this.listeners.values()) {
@@ -57,7 +59,12 @@ export class Monitor {
 
       if (dripSize > listener.dripSeen) {
         listener.dripSeen = dripSize
-      } else if (dripSize > listener.dripOffset) {
+        listener.dripChangedAt = now
+      } else if (
+        dripSize > listener.dripOffset &&
+        listener.dripChangedAt !== null &&
+        now - listener.dripChangedAt >= listener.quietMs
+      ) {
         const bytes = readRange(listener.drip, listener.dripOffset, dripSize)
         listener.dripOffset += bytes.length
         const chunk = listener.dripDecoder.write(bytes)
@@ -145,6 +152,7 @@ export class Monitor {
     listener.dripIdentity = identity
     listener.dripOffset = 0
     listener.dripSeen = 0
+    listener.dripChangedAt = null
     listener.dripDecoder = new StringDecoder("utf8")
   }
 
