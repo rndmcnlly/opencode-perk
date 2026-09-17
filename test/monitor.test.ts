@@ -47,6 +47,9 @@ function add(
     out: files.out,
     err: files.err,
     drip: files.drip,
+    cancelPath: files.cancel,
+    cancel: () => true,
+    cancelSent: false,
     pgid: 123,
     dripOffset: 0,
     dripSeen: 0,
@@ -116,6 +119,41 @@ test("completion flushes final drip before the terminal event", async () => {
     `Job ${files.id} exited 5: out 6 bytes, err 4 bytes`,
   ])
   assert.equal(monitor.listeners.size, 0)
+})
+
+test("a cancellation marker signals its registered job exactly once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "perk-cancel-test-"))
+  roots.push(root)
+  const files = makeJobFiles(join(root, "spool"))
+  let cancellations = 0
+  const monitor = new Monitor()
+  monitor.add({
+    inject: async () => {},
+    sessionID: "session-1",
+    id: files.id,
+    exit: files.exit,
+    out: files.out,
+    err: files.err,
+    drip: files.drip,
+    cancelPath: files.cancel,
+    cancel: () => {
+      cancellations += 1
+      return true
+    },
+    cancelSent: false,
+    pgid: 123,
+    dripOffset: 0,
+    dripSeen: 0,
+    dripIdentity: files.dripIdentity,
+    dripChangedAt: null,
+    quietMs: 1000,
+  })
+  writeFileSync(files.cancel, "")
+
+  monitor.tick()
+  monitor.tick()
+
+  assert.equal(cancellations, 1)
 })
 
 test("UTF-8 split across settled reads is decoded once complete", async () => {

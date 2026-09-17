@@ -1,6 +1,6 @@
 {
   "name": "opencode-perk",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A minimal afferent channel for a harnessed model: fire a background job, get woken with a conversational turn when it finishes.",
   "keywords": [
     "opencode",
@@ -37,9 +37,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && npm run bundle",
     "bundle": "esbuild src/index.ts --bundle --format=esm --platform=node --external:@opencode-ai/plugin --outfile=dist/perk.js",
+    "build:extension": "esbuild openchamber-extension/panel/main.ts --bundle --format=iife --platform=browser --outfile=openchamber-extension/panel/main.js && esbuild openchamber-extension/service/main.ts --bundle --format=esm --platform=node --outfile=openchamber-extension/service/main.js",
+    "typecheck:extension": "tsc -p openchamber-extension/tsconfig.json",
     "clean": "rm -rf dist",
     "test": "tsx --test test/*.test.ts",
-    "check": "npm run build && npm test",
+    "check": "npm run build && npm run typecheck:extension && npm run build:extension && npm test",
     "refresh:opencode": "rm -rf \"${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/opencode-perk@latest\"",
     "prepack": "npm run clean && npm run build"
   },
@@ -47,6 +49,7 @@
     "@opencode-ai/plugin": ">=1.0.0"
   },
   "devDependencies": {
+    "@openchamber/sdk": "^1.24.0",
     "@opencode-ai/plugin": ">=1.15.0",
     "@types/node": "^22.19.19",
     "esbuild": "^0.28.1",

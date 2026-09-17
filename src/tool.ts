@@ -5,7 +5,7 @@ import type { PerkRuntime } from "./runtime.js"
 const description =
   "Run a shell command as a detached background job and return immediately. " +
   "Use this for long work you do not want to block on; unlike builtin bash, " +
-  "perk wakes you when the job finishes. Give only the command: do not add " +
+  "perk wakes you when the job finishes. Give the command without adding " +
   "nohup, &, disown, redirection, or output paths. perk returns the job's pgid " +
   "and <job-dir>/{out,err,drip,exit}, then injects its exit result and captured " +
   "output sizes on completion. For interim progress, append messages to " +
@@ -39,6 +39,24 @@ export function createBackgroundTool(runtime: PerkRuntime, inject: Injector) {
             "delivered as one spike. Defaults to 1.0; values below 0.3 are " +
             "clamped.",
         ),
+      label: tool.schema
+        .string()
+        .max(100)
+        .optional()
+        .describe(
+          "Short phrase describing why this heavyweight job is being run. " +
+            "Used as its display label; omit when the command is already " +
+            "self-explanatory.",
+        ),
+      expected_seconds: tool.schema
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Approximate wall-clock duration for display only. This does not " +
+            "impose a timeout. Omit it when duration is not meaningfully " +
+            "predictable.",
+        ),
     },
     async execute(args, ctx) {
       const job = await runtime.launch(
@@ -47,6 +65,8 @@ export function createBackgroundTool(runtime: PerkRuntime, inject: Injector) {
         ctx.sessionID,
         inject,
         args.coalesce_seconds,
+        args.label,
+        args.expected_seconds,
       )
       return (
         `Backgrounded ${job.id} (detached, pgid ${job.pgid}). ` +

@@ -251,8 +251,9 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
   expected, or did the segmentation surprise you?
 - Did cancellation publish `cancelled:TERM` and resolve the same exit-file gate
   used for normal completion?
-- Anything about `bash_background` (its single `command` arg with no paths
-  to choose; the command recorded verbatim in your own tool call, *not* echoed
+- Anything about `bash_background` (its required `command` arg with no paths
+  to choose; its optional display and coalescing hints; the command recorded
+  verbatim in your own tool call, *not* echoed
   back in the wake; capture reported by size + path; the immediate return; the
   pgid) that read wrong?
 

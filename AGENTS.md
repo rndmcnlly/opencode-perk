@@ -3,7 +3,8 @@
 ## What this is
 
 `opencode-perk` is an opencode plugin published to npm. It adds one tool,
-`bash_background({ command })`, that runs a shell command as a detached
+`bash_background({ command, label?, expected_seconds?, coalesce_seconds? })`,
+that runs a shell command as a detached
 fire-and-forget job and returns immediately. When the job finishes, perk injects
 a conversational turn into the idle session reporting the exit code and the byte
 sizes of captured stdout/stderr. It is the *afferent channel* for a harnessed

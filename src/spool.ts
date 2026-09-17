@@ -6,8 +6,10 @@ import {
   openSync,
   readSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs"
 import { randomBytes } from "node:crypto"
 import { tmpdir } from "node:os"
@@ -21,11 +23,25 @@ export type FileState = { size: number; identity: string }
 export type JobFiles = {
   id: string
   dir: string
+  launch: string
+  cancel: string
   exit: string
   out: string
   err: string
   drip: string
   dripIdentity: string
+}
+
+export type LaunchRecord = {
+  schema: 1
+  id: string
+  sessionId: string
+  label?: string
+  command: string
+  cwd: string
+  pgid: number
+  startedAt: string
+  expectedSeconds?: number
 }
 
 export function size(path: string): number {
@@ -112,6 +128,8 @@ export function makeJobFiles(spoolDir = SPOOL_DIR): JobFiles {
       return {
         id,
         dir,
+        launch: join(dir, "launch.json"),
+        cancel: join(dir, "cancel"),
         exit: join(dir, "exit"),
         out: join(dir, "out"),
         err: join(dir, "err"),
@@ -123,6 +141,21 @@ export function makeJobFiles(spoolDir = SPOOL_DIR): JobFiles {
       rmSync(dir, { recursive: true, force: true })
       throw error
     }
+  }
+}
+
+export function writeLaunchRecord(path: string, record: LaunchRecord) {
+  const temporary = `${path}.tmp`
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    })
+    renameSync(temporary, path)
+  } catch (error) {
+    rmSync(temporary, { force: true })
+    throw error
   }
 }
 

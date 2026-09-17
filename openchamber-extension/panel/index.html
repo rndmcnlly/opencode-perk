@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Background jobs</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; }
+      body { padding: 12px; }
+      #message { font-size: 13px; line-height: 1.45; opacity: 0.7; padding: 18px 4px; }
+      #notice { display: none; font-size: 12px; line-height: 1.4; margin-bottom: 8px; padding: 8px; border-radius: 6px; background: color-mix(in srgb, var(--oc-error, currentColor) 12%, transparent); }
+      #jobs { display: grid; gap: 8px; }
+      .job { position: relative; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 8px; padding: 10px; }
+      .label { padding-right: 22px; font-size: 13px; font-weight: 650; line-height: 1.35; margin-bottom: 6px; }
+      .job-id { font-family: var(--oc-font-mono, monospace); opacity: 0.58; }
+      .program { max-height: 180px; margin: 0; }
+      .details { display: flex; gap: 6px; margin-top: 7px; font-size: 11px; opacity: 0.66; }
+      .state { font-weight: 650; opacity: 1; }
+      .running .state { color: var(--oc-info-text, currentColor); }
+      .success .state { color: var(--oc-success-text, currentColor); }
+      .failure .state { color: var(--oc-error-text, currentColor); }
+      .budget { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 10%, transparent); }
+      .budget > span { display: block; height: 100%; border-radius: inherit; background: var(--oc-primary, currentColor); }
+      .budget > span.advancing { animation: budget-elapse linear forwards; }
+      .budget.overrun > span { background: var(--oc-warning, currentColor); }
+      @keyframes budget-elapse { to { width: 100%; } }
+      .actions { display: flex; gap: 6px; margin-top: 9px; }
+      button { color: inherit; font: inherit; font-size: 11px; padding: 4px 8px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 6px; background: transparent; cursor: pointer; }
+      button:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+      button.danger { color: var(--oc-error-text, currentColor); }
+      button:disabled { cursor: default; opacity: 0.5; }
+      button.dismiss { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0; border: 0; color: var(--oc-error-text, currentColor); font-size: 18px; line-height: 24px; }
+      details { margin-top: 9px; font-size: 11px; }
+      summary { cursor: pointer; opacity: 0.65; }
+      .live-output { margin-top: 10px; }
+      .output-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 650; }
+      .stream-tabs { display: flex; gap: 4px; margin: 8px 0 6px; }
+      .output-header .stream-tabs { margin: 0; }
+      .stream-tabs button.active { border-color: var(--oc-primary, currentColor); color: var(--oc-primary-text, currentColor); background: color-mix(in srgb, var(--oc-primary, currentColor) 12%, transparent); }
+      .output-view { min-height: 84px; max-height: 240px; margin: 0; overflow: auto; white-space: pre; overflow-wrap: normal; }
+      .output-note { margin-top: 5px; opacity: 0.52; }
+      dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; margin: 8px 0; }
+      dt { opacity: 0.55; }
+      dd { margin: 0; overflow-wrap: anywhere; font-family: var(--oc-font-mono, monospace); }
+      pre { margin: 7px 0 0; padding: 7px; overflow-x: auto; border-radius: 6px; background: color-mix(in srgb, currentColor 7%, transparent); font-family: var(--oc-font-mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <div id="notice"></div>
+    <div id="message">Open a conversation to see its jobs.</div>
+    <div id="jobs"></div>
+    <script src="main.js"></script>
+  </body>
+</html>

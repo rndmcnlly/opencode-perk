@@ -7,6 +7,7 @@ import {
   SPOOL_DIR,
   sweepCompletedJobs,
   SWEEP_MS,
+  writeLaunchRecord,
 } from "./spool.js"
 
 export const POLL_MS = 300
@@ -40,13 +41,28 @@ export class PerkRuntime {
     sessionID: string,
     inject: Injector,
     coalesceSeconds = DEFAULT_COALESCE_SECONDS,
+    label?: string,
+    expectedSeconds?: number,
   ): Promise<JobHandle> {
     if (this.disposed) throw new Error("perk runtime is disposed")
     const files = makeJobFiles()
-    let pgid: number
+    const startedAt = new Date().toISOString()
+    let pgid: number | undefined
     try {
       pgid = await spawnBackground(command, files, cwd)
+      writeLaunchRecord(files.launch, {
+        schema: 1,
+        id: files.id,
+        sessionId: sessionID,
+        ...(label === undefined ? {} : { label }),
+        command,
+        cwd,
+        pgid,
+        startedAt,
+        ...(expectedSeconds === undefined ? {} : { expectedSeconds }),
+      })
     } catch (error) {
+      if (pgid !== undefined) killJob(pgid)
       rmSync(files.dir, { recursive: true, force: true })
       throw error
     }
@@ -66,6 +82,9 @@ export class PerkRuntime {
       out: files.out,
       err: files.err,
       drip: files.drip,
+      cancelPath: files.cancel,
+      cancel: () => killJob(pgid),
+      cancelSent: false,
       pgid,
       dripOffset: 0,
       dripSeen: 0,

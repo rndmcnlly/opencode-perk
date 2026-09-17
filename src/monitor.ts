@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { StringDecoder } from "node:string_decoder"
 import { fileState, readRange, size } from "./spool.js"
 
@@ -10,6 +10,9 @@ export type Listener = {
   out: string
   err: string
   drip: string
+  cancelPath: string
+  cancel: () => boolean
+  cancelSent: boolean
   pgid: number
   dripOffset: number
   dripSeen: number
@@ -82,6 +85,11 @@ export class Monitor {
       try {
         code = readFileSync(listener.exit, "utf8").trim() || "?"
       } catch {
+        if (!listener.cancelSent && existsSync(listener.cancelPath)) {
+          listener.cancelSent = true
+          const ok = listener.cancel()
+          this.logger("cancel requested", { pgid: listener.pgid, ok })
+        }
         continue
       }
 

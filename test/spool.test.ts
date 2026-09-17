@@ -4,6 +4,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   utimesSync,
@@ -17,6 +18,7 @@ import {
   ensureSpoolDir,
   RETENTION_MS,
   sweepCompletedJobs,
+  writeLaunchRecord,
 } from "../src/spool.js"
 
 const roots: string[] = []
@@ -40,6 +42,27 @@ test("makeJobFiles creates a private job directory and drip fiber", () => {
   assert.equal(statSync(files.dir).mode & 0o777, 0o700)
   assert.equal(statSync(files.drip).mode & 0o777, 0o600)
   assert.ok(files.dripIdentity)
+  assert.equal(files.launch, join(files.dir, "launch.json"))
+  assert.equal(files.cancel, join(files.dir, "cancel"))
+})
+
+test("launch record is published privately and atomically", () => {
+  const files = makeJobFiles(temporarySpool())
+  const metadata = {
+    schema: 1 as const,
+    id: files.id,
+    sessionId: "session-1",
+    command: "sleep 20",
+    cwd: "/tmp/project",
+    pgid: 123,
+    startedAt: "2026-09-17T12:00:00.000Z",
+  }
+
+  writeLaunchRecord(files.launch, metadata)
+
+  assert.deepEqual(JSON.parse(readFileSync(files.launch, "utf8")), metadata)
+  assert.equal(statSync(files.launch).mode & 0o777, 0o600)
+  assert.equal(existsSync(`${files.launch}.tmp`), false)
 })
 
 test("spool setup does not change its shared parent permissions", () => {
