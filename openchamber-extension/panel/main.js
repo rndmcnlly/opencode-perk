@@ -448,7 +448,7 @@
         post({ ...envelope, type: "workspace-unsubscribe", id: nextId(ids), payload: { subscriptionId } });
       };
     };
-    const storage = async (payload) => {
+    const storage2 = async (payload) => {
       if ("key" in payload && (payload.key.length === 0 || payload.key.length > GUEST_STORAGE_KEY_MAX)) {
         throw new HostRequestError("HOST_REJECTED", "Storage key must contain 1 to 128 characters.");
       }
@@ -494,23 +494,23 @@
         if (snapshot.kind === "sessions")
           listener(snapshot);
       }),
-      openSession: async (sessionId2) => {
-        requireIdentity(sessionId2);
-        await request({ ...envelope, type: "open-session", id: nextId(ids), payload: { sessionId: sessionId2 } });
+      openSession: async (sessionId3) => {
+        requireIdentity(sessionId3);
+        await request({ ...envelope, type: "open-session", id: nextId(ids), payload: { sessionId: sessionId3 } });
       },
       storage: {
         get: async (key) => {
-          const result = await storage({ op: "get", key });
+          const result = await storage2({ op: "get", key });
           return result.op === "get" && result.found ? result.value : void 0;
         },
         set: async (key, value) => {
-          await storage({ op: "set", key, value });
+          await storage2({ op: "set", key, value });
         },
         delete: async (key) => {
-          await storage({ op: "delete", key });
+          await storage2({ op: "delete", key });
         },
         keys: async () => {
-          const result = await storage({ op: "keys" });
+          const result = await storage2({ op: "keys" });
           if (result.op !== "keys")
             throw new HostRequestError("HOST_REJECTED", "Expected storage keys.");
           return result.keys;
@@ -1124,16 +1124,180 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return `exited ${code}`;
   }
 
+  // openchamber-extension/panel/mock-host.ts
+  var sessionId = "visual-preview";
+  var previewStartedAt = Date.now();
+  var storage = /* @__PURE__ */ new Map([[`collapsed:${sessionId}`, ["deadbeef"]]]);
+  var cancellationRequestedAt = null;
+  function iso(time) {
+    return new Date(time).toISOString();
+  }
+  function activeJob(now) {
+    const naturalFinish = previewStartedAt + 22e3;
+    const cancelledFinish = cancellationRequestedAt === null ? Infinity : cancellationRequestedAt + 800;
+    const finishedAt = Math.min(naturalFinish, cancelledFinish);
+    const completed = now >= finishedAt;
+    return {
+      id: "a1b2c3d4",
+      sessionId,
+      label: "Verify richer card headers and responsive output behavior",
+      command: "npm run check -- --reporter=spec --fixture=" + "a-very-long-unbroken-argument-".repeat(18),
+      cwd: "/Users/adam/Desktop/opencode-perk",
+      pgid: 42117,
+      startedAt: iso(previewStartedAt - 8e3),
+      timeoutMs: 12e4,
+      expectedMs: 3e4,
+      jobDir: "/tmp/opencode/perk/a1b2c3d4",
+      ...completed ? { finishedAt: iso(finishedAt) } : {},
+      cancellationRequested: cancellationRequestedAt !== null && !completed,
+      state: completed ? "completed" : "running",
+      ...completed ? { outcome: cancellationRequestedAt === null ? "0" : "cancelled:SIGTERM" } : {}
+    };
+  }
+  function jobs(now = Date.now()) {
+    return [
+      activeJob(now),
+      {
+        id: "cafefeed",
+        sessionId,
+        command: "uv run --script analyze.py --input recordings/session-with-a-long-file-name.wav --emit-json",
+        cwd: "/Users/adam/Desktop/research",
+        pgid: 42142,
+        startedAt: iso(previewStartedAt - 67e3),
+        timeoutMs: 36e5,
+        jobDir: "/tmp/opencode/perk/cafefeed",
+        cancellationRequested: false,
+        state: "running"
+      },
+      {
+        id: "deadbeef",
+        sessionId,
+        label: "Build extension bundles",
+        command: "npm run build:extension",
+        cwd: "/Users/adam/Desktop/opencode-perk",
+        pgid: 41902,
+        startedAt: iso(previewStartedAt - 125e3),
+        finishedAt: iso(previewStartedAt - 65e3),
+        timeoutMs: 12e4,
+        expectedMs: 6e4,
+        jobDir: "/tmp/opencode/perk/deadbeef",
+        cancellationRequested: false,
+        state: "completed",
+        outcome: "0"
+      },
+      {
+        id: "badc0ffe",
+        sessionId,
+        label: "A deliberately long task summary that demonstrates wrapping behavior without forcing the entire card wider than the preview viewport",
+        command: "node scripts/check-layout.js",
+        cwd: "/Users/adam/Desktop/opencode-perk",
+        pgid: 41881,
+        startedAt: iso(previewStartedAt - 94200),
+        finishedAt: iso(previewStartedAt - 9e4),
+        timeoutMs: 3e4,
+        jobDir: "/tmp/opencode/perk/badc0ffe",
+        cancellationRequested: false,
+        state: "completed",
+        outcome: "1"
+      }
+    ];
+  }
+  function output(job, stream, now) {
+    if (stream === "stderr") {
+      return job.id === "badc0ffe" ? "AssertionError: card exceeded viewport width\n" : "";
+    }
+    if (stream === "progress") {
+      if (job.state === "completed") return "complete\n";
+      const elapsed = now - Date.parse(job.startedAt);
+      return `processed ${Math.max(1, Math.floor(elapsed / 2e3))} batches
+`;
+    }
+    if (job.id === "a1b2c3d4") {
+      const lines = Math.min(15, Math.max(1, Math.floor((now - previewStartedAt + 8e3) / 2e3)));
+      return [
+        "building extension preview...",
+        `LONG_LINE=${"0123456789abcdef".repeat(40)}`,
+        ...Array.from({ length: lines }, (_, index) => `check ${index + 1}: passed`),
+        ...job.state === "completed" ? ["all checks complete"] : []
+      ].join("\n") + "\n";
+    }
+    if (job.id === "cafefeed") {
+      const lines = Math.min(40, Math.max(2, Math.floor((now - previewStartedAt + 67e3) / 3e3)));
+      return Array.from(
+        { length: lines },
+        (_, index) => `frame ${String(index + 1).padStart(3, "0")}: rms=-18.${index % 10}dB`
+      ).join("\n") + "\n";
+    }
+    if (job.id === "deadbeef") return "panel/main.js  64.3kb\nservice/main.js  7.8kb\n";
+    return "layout assertion failed\n";
+  }
+  function base64(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+  function createMockHost() {
+    return {
+      onReady: () => () => {
+      },
+      onSession: (listener) => {
+        queueMicrotask(
+          () => listener({ id: sessionId, title: "Visual preview", busy: true })
+        );
+        return () => {
+        };
+      },
+      storage: {
+        get: async (key) => storage.get(key),
+        set: async (key, value) => {
+          storage.set(key, value);
+        }
+      },
+      serviceRequest: async (request) => {
+        const now = Date.now();
+        if (request.method === "GET" && request.path === "/jobs") {
+          return { status: 200, body: JSON.stringify({ jobs: jobs(now) }) };
+        }
+        const outputMatch = request.path.match(
+          /^\/jobs\/([0-9a-f]{8})\/output\/(stdout|stderr|progress)$/
+        );
+        if (request.method === "GET" && outputMatch) {
+          const job = jobs(now).find((candidate) => candidate.id === outputMatch[1]);
+          if (!job) return { status: 404, body: JSON.stringify({ error: "not-found" }) };
+          const bytes = new TextEncoder().encode(output(job, outputMatch[2], now));
+          const offset = Number(request.query?.offset ?? "0");
+          return {
+            status: 200,
+            body: JSON.stringify({
+              identity: `mock-${job.id}`,
+              offset,
+              nextOffset: bytes.length,
+              size: bytes.length,
+              data: base64(bytes.slice(offset)),
+              complete: job.state === "completed",
+              reset: false
+            })
+          };
+        }
+        if (request.method === "POST" && request.path === "/jobs/a1b2c3d4/cancel") {
+          cancellationRequestedAt ??= now;
+          return { status: 202, body: JSON.stringify({ state: "requested" }) };
+        }
+        return { status: 404, body: JSON.stringify({ error: "not-found" }) };
+      }
+    };
+  }
+
   // openchamber-extension/panel/main.ts
-  var host = connectHost();
+  var host = new URLSearchParams(location.search).has("mock") ? createMockHost() : connectHost();
   var jobsRoot = document.querySelector("#jobs");
   var message = document.querySelector("#message");
   var notice = document.querySelector("#notice");
-  var sessionId = null;
+  var sessionId2 = null;
   var requestGeneration = 0;
-  var jobs = [];
-  var dismissalsReady = false;
-  var dismissed = /* @__PURE__ */ new Set();
+  var jobs2 = [];
+  var collapseStateReady = false;
+  var collapsed = /* @__PURE__ */ new Set();
   var expanded = /* @__PURE__ */ new Set();
   var selectedOutput = /* @__PURE__ */ new Map();
   var streamStates = /* @__PURE__ */ new Map();
@@ -1149,8 +1313,13 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     const seconds = Math.floor(ms / 1e3);
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    if (minutes < 60) {
+      const remainingSeconds = seconds % 60;
+      return remainingSeconds ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
   }
   function status(job) {
     if (job.state === "running" && job.cancellationRequested) {
@@ -1170,11 +1339,14 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return element;
   }
   function storageKey(id) {
+    return `collapsed:${id}`;
+  }
+  function legacyStorageKey(id) {
     return `dismissed:${id}`;
   }
-  async function saveDismissed() {
-    if (!sessionId) return;
-    await host.storage.set(storageKey(sessionId), [...dismissed]);
+  async function saveCollapsed() {
+    if (!sessionId2) return;
+    await host.storage.set(storageKey(sessionId2), [...collapsed]);
   }
   function showNotice(text) {
     notice.textContent = text;
@@ -1225,7 +1397,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return bytes;
   }
   async function refreshOutput(jobId, stream) {
-    const currentSession = sessionId;
+    const currentSession = sessionId2;
     const state = streamState(jobId, stream);
     if (!currentSession || state.loading || state.complete) return;
     state.loading = true;
@@ -1235,7 +1407,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         path: `/jobs/${jobId}/output/${stream}`,
         query: { session: currentSession, offset: String(state.offset) }
       });
-      if (currentSession !== sessionId) return;
+      if (currentSession !== sessionId2) return;
       if (response.status !== 200) throw new Error(`Service answered ${response.status}`);
       const chunk = JSON.parse(response.body);
       if (chunk.reset || state.identity !== null && chunk.identity !== null && state.identity !== chunk.identity) {
@@ -1273,18 +1445,46 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
   }
   function render() {
     jobsRoot.replaceChildren();
-    const shown = jobs.filter((job) => !dismissed.has(job.id));
-    message.hidden = shown.length > 0;
-    message.textContent = jobs.length ? "All completed jobs in this conversation are dismissed." : "No background jobs in this conversation.";
-    for (const job of shown) {
+    message.hidden = jobs2.length > 0;
+    message.textContent = "No background jobs in this conversation.";
+    for (const job of jobs2) {
       const state = status(job);
+      const elapsedMs = duration(job.startedAt, job.finishedAt);
       const card = document.createElement("article");
-      card.className = `job ${state.tone}`;
-      const label = document.createElement("div");
-      label.className = "label";
-      label.append(textElement("span", "job-id", job.id));
-      if (job.label) label.append(document.createTextNode(`: ${job.label}`));
-      card.append(label);
+      const isCollapsed = collapsed.has(job.id);
+      card.className = `job ${state.tone}${isCollapsed ? " collapsed" : ""}`;
+      const header = document.createElement("header");
+      header.className = "card-header";
+      const statusLine = document.createElement("div");
+      statusLine.className = "status-line";
+      const stateLabel = textElement("span", "state", state.label);
+      const age = textElement(
+        "span",
+        "elapsed",
+        job.expectedMs ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}` : formatDuration(elapsedMs)
+      );
+      statusLine.append(stateLabel, age);
+      const taskSummary = document.createElement("div");
+      taskSummary.className = "task-summary";
+      taskSummary.textContent = job.label?.trim() || job.command.split("\n").find((line) => line.trim())?.trim() || "Unnamed job";
+      taskSummary.title = taskSummary.textContent;
+      header.append(statusLine, taskSummary);
+      card.append(header);
+      const collapseToggle = document.createElement("button");
+      collapseToggle.className = "collapse-toggle";
+      collapseToggle.textContent = isCollapsed ? "Expand" : "Collapse";
+      collapseToggle.setAttribute("aria-expanded", String(!isCollapsed));
+      collapseToggle.addEventListener("click", () => {
+        if (isCollapsed) collapsed.delete(job.id);
+        else collapsed.add(job.id);
+        render();
+        void saveCollapsed().catch(
+          (error) => showNotice(
+            `Could not save collapsed cards: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+      });
+      card.append(collapseToggle);
       const program = document.createElement("pre");
       program.className = "program";
       program.textContent = job.command;
@@ -1300,16 +1500,6 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
         program.scrollTop = savedProgramScroll.top;
         program.scrollLeft = savedProgramScroll.left;
       });
-      const details = document.createElement("div");
-      details.className = "details";
-      const stateLabel = document.createElement("span");
-      stateLabel.className = "state";
-      stateLabel.textContent = state.label;
-      const age = document.createElement("span");
-      const elapsedMs = duration(job.startedAt, job.finishedAt);
-      age.textContent = job.expectedMs ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}` : formatDuration(elapsedMs);
-      details.append(stateLabel, age);
-      card.append(details);
       if (job.state === "running" && job.expectedMs) {
         const budget = document.createElement("div");
         const ratio = elapsedMs / job.expectedMs;
@@ -1344,15 +1534,15 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
         tabs.append(button2);
       }
       outputHeader.append(tabs);
-      const output = document.createElement("pre");
-      output.className = "output-view";
+      const output2 = document.createElement("pre");
+      output2.className = "output-view";
       const activeState = streamState(job.id, activeStream);
-      activeState.element = output;
-      output.addEventListener("scroll", () => {
-        activeState.scrollTop = output.scrollTop;
-        activeState.followTail = output.scrollHeight - output.clientHeight - output.scrollTop < 16;
+      activeState.element = output2;
+      output2.addEventListener("scroll", () => {
+        activeState.scrollTop = output2.scrollTop;
+        activeState.followTail = output2.scrollHeight - output2.clientHeight - output2.scrollTop < 16;
       });
-      outputSection.append(outputHeader, output);
+      outputSection.append(outputHeader, output2);
       if (job.state === "running") {
         outputSection.append(textElement("div", "output-note", "Following live sidecar bytes"));
       }
@@ -1367,29 +1557,13 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       const summaryElement = document.createElement("summary");
       summaryElement.textContent = "Details";
       const list = document.createElement("dl");
+      detailRow(list, "Job ID", job.id);
       detailRow(list, "Start", job.startedAt);
       if (job.finishedAt) detailRow(list, "Finish", job.finishedAt);
       detailRow(list, "PGID", String(job.pgid));
       detailRow(list, "Directory", job.jobDir);
       technical.append(summaryElement, list);
       card.append(technical);
-      if (job.state === "completed") {
-        const dismiss = document.createElement("button");
-        dismiss.className = "dismiss";
-        dismiss.textContent = "\xD7";
-        dismiss.title = "Dismiss completed job";
-        dismiss.setAttribute("aria-label", "Dismiss completed job");
-        dismiss.addEventListener("click", () => {
-          dismissed.add(job.id);
-          render();
-          void saveDismissed().catch(
-            (error) => showNotice(
-              `Could not save dismissal: ${error instanceof Error ? error.message : String(error)}`
-            )
-          );
-        });
-        card.append(dismiss);
-      }
       const actions = document.createElement("div");
       actions.className = "actions";
       if (job.state === "running") {
@@ -1399,7 +1573,7 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
         stop.textContent = job.cancellationRequested ? "Cancellation requested" : confirming ? "Confirm stop" : "Stop";
         stop.disabled = job.cancellationRequested;
         stop.addEventListener("click", () => {
-          if (!sessionId || job.cancellationRequested) return;
+          if (!sessionId2 || job.cancellationRequested) return;
           if (!confirming) {
             confirmStop = { id: job.id, until: Date.now() + 5e3 };
             render();
@@ -1410,7 +1584,7 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
           void host.serviceRequest({
             method: "POST",
             path: `/jobs/${job.id}/cancel`,
-            query: { session: sessionId }
+            query: { session: sessionId2 }
           }).then(() => refresh()).catch((error) => {
             showNotice(
               `Could not request cancellation: ${error instanceof Error ? error.message : String(error)}`
@@ -1425,7 +1599,7 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
     }
   }
   async function refresh() {
-    const currentSession = sessionId;
+    const currentSession = sessionId2;
     const generation = ++requestGeneration;
     if (!currentSession) {
       jobsRoot.replaceChildren();
@@ -1433,27 +1607,27 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       message.textContent = "Open a conversation to see its jobs.";
       return;
     }
-    if (!dismissalsReady) return;
+    if (!collapseStateReady) return;
     try {
       const result = await host.serviceRequest({
         method: "GET",
         path: "/jobs",
         query: { session: currentSession }
       });
-      if (generation !== requestGeneration || currentSession !== sessionId) return;
+      if (generation !== requestGeneration || currentSession !== sessionId2) return;
       if (result.status !== 200) throw new Error(`Service answered ${result.status}`);
       const payload = JSON.parse(result.body);
-      jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
-      const retained = new Set(jobs.map((job) => job.id));
-      const pruned = new Set([...dismissed].filter((id) => retained.has(id)));
-      if (pruned.size !== dismissed.size) {
-        dismissed = pruned;
-        void saveDismissed();
+      jobs2 = Array.isArray(payload.jobs) ? payload.jobs : [];
+      const retained = new Set(jobs2.map((job) => job.id));
+      const pruned = new Set([...collapsed].filter((id) => retained.has(id)));
+      if (pruned.size !== collapsed.size) {
+        collapsed = pruned;
+        void saveCollapsed();
       }
       showNotice("");
       render();
     } catch (error) {
-      if (generation !== requestGeneration || currentSession !== sessionId) return;
+      if (generation !== requestGeneration || currentSession !== sessionId2) return;
       jobsRoot.replaceChildren();
       message.hidden = false;
       message.textContent = `Could not read perk jobs: ${error instanceof Error ? error.message : String(error)}`;
@@ -1461,42 +1635,47 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
   }
   host.onReady((context) => applyHostReady(context, document.documentElement));
   host.onSession((session) => {
-    sessionId = session?.id ?? null;
-    jobs = [];
-    dismissed = /* @__PURE__ */ new Set();
+    sessionId2 = session?.id ?? null;
+    jobs2 = [];
+    collapsed = /* @__PURE__ */ new Set();
     expanded = /* @__PURE__ */ new Set();
     selectedOutput = /* @__PURE__ */ new Map();
     streamStates = /* @__PURE__ */ new Map();
     programScroll = /* @__PURE__ */ new Map();
-    dismissalsReady = false;
+    collapseStateReady = false;
     confirmStop = null;
     requestGeneration += 1;
     render();
-    if (!sessionId) {
+    if (!sessionId2) {
       void refresh();
       return;
     }
-    const loadingSession = sessionId;
-    void host.storage.get(storageKey(loadingSession)).then((value) => {
-      if (sessionId !== loadingSession) return;
-      dismissed = new Set(
-        Array.isArray(value) ? value.filter((id) => typeof id === "string") : []
+    const loadingSession = sessionId2;
+    void Promise.all([
+      host.storage.get(storageKey(loadingSession)),
+      host.storage.get(legacyStorageKey(loadingSession))
+    ]).then(([value, legacyValue]) => {
+      if (sessionId2 !== loadingSession) return;
+      const stored = Array.isArray(value) ? value : legacyValue;
+      collapsed = new Set(
+        Array.isArray(stored) ? stored.filter((id) => typeof id === "string") : []
       );
-      dismissalsReady = true;
+      collapseStateReady = true;
+      if (!Array.isArray(value) && Array.isArray(legacyValue)) void saveCollapsed();
       return refresh();
     }).catch((error) => {
-      if (sessionId !== loadingSession) return;
-      dismissalsReady = true;
+      if (sessionId2 !== loadingSession) return;
+      collapseStateReady = true;
       showNotice(
-        `Could not load dismissals: ${error instanceof Error ? error.message : String(error)}`
+        `Could not load collapsed cards: ${error instanceof Error ? error.message : String(error)}`
       );
       return refresh();
     });
   });
   window.setInterval(() => void refresh(), 1e3);
   window.setInterval(() => {
-    for (const job of jobs) {
-      if (dismissed.has(job.id)) continue;
+    for (const job of jobs2) {
+      if (collapsed.has(job.id)) continue;
       const stream = selectedOutput.get(job.id) ?? "stdout";
       const state = streamState(job.id, stream);
       if (job.state === "running" || !state.complete) {

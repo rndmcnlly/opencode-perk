@@ -38,6 +38,7 @@
     "build": "tsc -p tsconfig.json && npm run bundle",
     "bundle": "esbuild src/index.ts --bundle --format=esm --platform=node --external:@opencode-ai/plugin --outfile=dist/perk.js",
     "build:extension": "esbuild openchamber-extension/panel/main.ts --bundle --format=iife --platform=browser --outfile=openchamber-extension/panel/main.js && esbuild openchamber-extension/service/main.ts --bundle --format=esm --platform=node --outfile=openchamber-extension/service/main.js",
+    "dev:extension": "esbuild openchamber-extension/panel/main.ts --bundle --format=iife --platform=browser --outfile=openchamber-extension/panel/main.js --servedir=openchamber-extension --serve=4173 --watch=forever",
     "typecheck:extension": "tsc -p openchamber-extension/tsconfig.json",
     "clean": "rm -rf dist",
     "test": "tsx --test test/*.test.ts",

@@ -1,6 +1,7 @@
 import { connectHost } from "@openchamber/sdk"
 import { applyHostReady } from "@openchamber/sdk/ui"
 import { describeOutcome, type VisibleJob } from "../../src/protocol.js"
+import { createMockHost, type PanelHost } from "./mock-host.js"
 
 type OutputStream = "stdout" | "stderr" | "progress"
 
@@ -27,15 +28,17 @@ type StreamState = {
   error: string | null
 }
 
-const host = connectHost()
+const host: PanelHost = new URLSearchParams(location.search).has("mock")
+  ? createMockHost()
+  : connectHost()
 const jobsRoot = document.querySelector<HTMLDivElement>("#jobs")!
 const message = document.querySelector<HTMLDivElement>("#message")!
 const notice = document.querySelector<HTMLDivElement>("#notice")!
 let sessionId: string | null = null
 let requestGeneration = 0
 let jobs: VisibleJob[] = []
-let dismissalsReady = false
-let dismissed = new Set<string>()
+let collapseStateReady = false
+let collapsed = new Set<string>()
 let expanded = new Set<string>()
 let selectedOutput = new Map<string, OutputStream>()
 let streamStates = new Map<string, StreamState>()
@@ -53,8 +56,13 @@ function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  if (minutes < 60) {
+    const remainingSeconds = seconds % 60
+    return remainingSeconds ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+  }
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`
 }
 
 function status(job: VisibleJob): { label: string; tone: string } {
@@ -77,12 +85,16 @@ function textElement(tag: string, className: string, text: string): HTMLElement 
 }
 
 function storageKey(id: string): string {
+  return `collapsed:${id}`
+}
+
+function legacyStorageKey(id: string): string {
   return `dismissed:${id}`
 }
 
-async function saveDismissed() {
+async function saveCollapsed() {
   if (!sessionId) return
-  await host.storage.set(storageKey(sessionId), [...dismissed])
+  await host.storage.set(storageKey(sessionId), [...collapsed])
 }
 
 function showNotice(text: string) {
@@ -193,21 +205,50 @@ async function refreshOutput(jobId: string, stream: OutputStream) {
 
 function render() {
   jobsRoot.replaceChildren()
-  const shown = jobs.filter((job) => !dismissed.has(job.id))
-  message.hidden = shown.length > 0
-  message.textContent = jobs.length
-    ? "All completed jobs in this conversation are dismissed."
-    : "No background jobs in this conversation."
+  message.hidden = jobs.length > 0
+  message.textContent = "No background jobs in this conversation."
 
-  for (const job of shown) {
+  for (const job of jobs) {
     const state = status(job)
+    const elapsedMs = duration(job.startedAt, job.finishedAt)
     const card = document.createElement("article")
-    card.className = `job ${state.tone}`
-    const label = document.createElement("div")
-    label.className = "label"
-    label.append(textElement("span", "job-id", job.id))
-    if (job.label) label.append(document.createTextNode(`: ${job.label}`))
-    card.append(label)
+    const isCollapsed = collapsed.has(job.id)
+    card.className = `job ${state.tone}${isCollapsed ? " collapsed" : ""}`
+    const header = document.createElement("header")
+    header.className = "card-header"
+    const statusLine = document.createElement("div")
+    statusLine.className = "status-line"
+    const stateLabel = textElement("span", "state", state.label)
+    const age = textElement(
+      "span",
+      "elapsed",
+      job.expectedMs
+        ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}`
+        : formatDuration(elapsedMs),
+    )
+    statusLine.append(stateLabel, age)
+    const taskSummary = document.createElement("div")
+    taskSummary.className = "task-summary"
+    taskSummary.textContent =
+      job.label?.trim() || job.command.split("\n").find((line) => line.trim())?.trim() || "Unnamed job"
+    taskSummary.title = taskSummary.textContent
+    header.append(statusLine, taskSummary)
+    card.append(header)
+    const collapseToggle = document.createElement("button")
+    collapseToggle.className = "collapse-toggle"
+    collapseToggle.textContent = isCollapsed ? "Expand" : "Collapse"
+    collapseToggle.setAttribute("aria-expanded", String(!isCollapsed))
+    collapseToggle.addEventListener("click", () => {
+      if (isCollapsed) collapsed.delete(job.id)
+      else collapsed.add(job.id)
+      render()
+      void saveCollapsed().catch((error) =>
+        showNotice(
+          `Could not save collapsed cards: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+    })
+    card.append(collapseToggle)
     const program = document.createElement("pre")
     program.className = "program"
     program.textContent = job.command
@@ -223,19 +264,6 @@ function render() {
       program.scrollTop = savedProgramScroll.top
       program.scrollLeft = savedProgramScroll.left
     })
-    const details = document.createElement("div")
-    details.className = "details"
-    const stateLabel = document.createElement("span")
-    stateLabel.className = "state"
-    stateLabel.textContent = state.label
-    const age = document.createElement("span")
-    const elapsedMs = duration(job.startedAt, job.finishedAt)
-    age.textContent = job.expectedMs
-      ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}`
-      : formatDuration(elapsedMs)
-    details.append(stateLabel, age)
-    card.append(details)
-
     if (job.state === "running" && job.expectedMs) {
       const budget = document.createElement("div")
       const ratio = elapsedMs / job.expectedMs
@@ -296,30 +324,13 @@ function render() {
     const summaryElement = document.createElement("summary")
     summaryElement.textContent = "Details"
     const list = document.createElement("dl")
+    detailRow(list, "Job ID", job.id)
     detailRow(list, "Start", job.startedAt)
     if (job.finishedAt) detailRow(list, "Finish", job.finishedAt)
     detailRow(list, "PGID", String(job.pgid))
     detailRow(list, "Directory", job.jobDir)
     technical.append(summaryElement, list)
     card.append(technical)
-
-    if (job.state === "completed") {
-      const dismiss = document.createElement("button")
-      dismiss.className = "dismiss"
-      dismiss.textContent = "\u00d7"
-      dismiss.title = "Dismiss completed job"
-      dismiss.setAttribute("aria-label", "Dismiss completed job")
-      dismiss.addEventListener("click", () => {
-        dismissed.add(job.id)
-        render()
-        void saveDismissed().catch((error) =>
-          showNotice(
-            `Could not save dismissal: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        )
-      })
-      card.append(dismiss)
-    }
 
     const actions = document.createElement("div")
     actions.className = "actions"
@@ -372,7 +383,7 @@ async function refresh() {
     message.textContent = "Open a conversation to see its jobs."
     return
   }
-  if (!dismissalsReady) return
+  if (!collapseStateReady) return
 
   try {
     const result = await host.serviceRequest({
@@ -385,10 +396,10 @@ async function refresh() {
     const payload = JSON.parse(result.body) as { jobs?: VisibleJob[] }
     jobs = Array.isArray(payload.jobs) ? payload.jobs : []
     const retained = new Set(jobs.map((job) => job.id))
-    const pruned = new Set([...dismissed].filter((id) => retained.has(id)))
-    if (pruned.size !== dismissed.size) {
-      dismissed = pruned
-      void saveDismissed()
+    const pruned = new Set([...collapsed].filter((id) => retained.has(id)))
+    if (pruned.size !== collapsed.size) {
+      collapsed = pruned
+      void saveCollapsed()
     }
     showNotice("")
     render()
@@ -404,12 +415,12 @@ host.onReady((context) => applyHostReady(context, document.documentElement))
 host.onSession((session) => {
   sessionId = session?.id ?? null
   jobs = []
-  dismissed = new Set()
+  collapsed = new Set()
   expanded = new Set()
   selectedOutput = new Map()
   streamStates = new Map()
   programScroll = new Map()
-  dismissalsReady = false
+  collapseStateReady = false
   confirmStop = null
   requestGeneration += 1
   render()
@@ -418,21 +429,25 @@ host.onSession((session) => {
     return
   }
   const loadingSession = sessionId
-  void host.storage
-    .get(storageKey(loadingSession))
-    .then((value) => {
+  void Promise.all([
+    host.storage.get(storageKey(loadingSession)),
+    host.storage.get(legacyStorageKey(loadingSession)),
+  ])
+    .then(([value, legacyValue]) => {
       if (sessionId !== loadingSession) return
-      dismissed = new Set(
-        Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [],
+      const stored = Array.isArray(value) ? value : legacyValue
+      collapsed = new Set(
+        Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [],
       )
-      dismissalsReady = true
+      collapseStateReady = true
+      if (!Array.isArray(value) && Array.isArray(legacyValue)) void saveCollapsed()
       return refresh()
     })
     .catch((error) => {
       if (sessionId !== loadingSession) return
-      dismissalsReady = true
+      collapseStateReady = true
       showNotice(
-        `Could not load dismissals: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not load collapsed cards: ${error instanceof Error ? error.message : String(error)}`,
       )
       return refresh()
     })
@@ -440,7 +455,7 @@ host.onSession((session) => {
 window.setInterval(() => void refresh(), 1000)
 window.setInterval(() => {
   for (const job of jobs) {
-    if (dismissed.has(job.id)) continue
+    if (collapsed.has(job.id)) continue
     const stream = selectedOutput.get(job.id) ?? "stdout"
     const state = streamState(job.id, stream)
     if (job.state === "running" || !state.complete) {
