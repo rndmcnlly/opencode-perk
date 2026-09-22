@@ -1,0 +1,339 @@
+{
+  "opencode": "opencode v0.0.0-v2-202609221905",
+  "model": "omlx/Qwen3.8-27B-oQ6",
+  "sessionID": "ses_f352e4b30ffej3bB4q8p8z9BS0",
+  "messages": [
+    {
+      "id": "msg_0cad1b4f20018lIWZCC8GrwqOS",
+      "time": {
+        "created": 1790109136674
+      },
+      "text": "This is a live test of the perk V2 progress relay.\nUse the shell tool exactly once with background:true and run this exact command:\nprintf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'\nAfter launching it, do not poll or run another tool. Briefly acknowledge each progress or completion message you receive.",
+      "type": "user"
+    },
+    {
+      "id": "msg_0cad1b726001NhfkubX2Z7FIYj",
+      "time": {
+        "created": 1790109136682,
+        "streamed": 1790109176923,
+        "completed": 1790109176947
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B-oQ6",
+        "providerID": "omlx",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "\nThe user wants to run a shell command in the background, output a message, and sleep for a fixed period. After launching it, they want me to not poll or execute any other tools, and to briefly acknowledge each progress or completion message I receive.\n\nAlright, I'll go ahead and execute the command.\n",
+          "state": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1790109173057,
+            "completed": 1790109176915
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\n"
+        },
+        {
+          "type": "tool",
+          "id": "call_c08e8fea",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "printf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'",
+              "background": true
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Command moved to the background (shell ID: sh_0cad2546d001hjwGfwnKuk4W3H).\nOutput is streaming to: /var/folders/qj/gyqbn5y57956rrqd_g6yfqwr0000gn/T/perk-v2-live-hYfgmT/data/opencode/shell/b2cdf7152e553e986f49f521d0d4021fb5beda8a/sh_0cad2546d001hjwGfwnKuk4W3H.out"
+              },
+              {
+                "type": "text",
+                "text": "You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes."
+              }
+            ],
+            "metadata": {
+              "status": "running",
+              "truncated": false,
+              "shellID": "sh_0cad2546d001hjwGfwnKuk4W3H"
+            }
+          },
+          "time": {
+            "created": 1790109176911,
+            "ran": 1790109176919,
+            "completed": 1790109176945
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 6980,
+        "output": 138,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_0cad2547b001da4dkURO6Ld0SF",
+      "time": {
+        "created": 1790109176960,
+        "streamed": 1790109182008,
+        "completed": 1790109182009
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B-oQ6",
+        "providerID": "omlx",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "\nThe command has been launched in the background. It's now streaming output. I should briefly confirm the launch, and then wait for the notification. I should not poll. Let me end my response here.\n",
+          "state": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1790109179090,
+            "completed": 1790109182005
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\nBackground command launched (shell ID `sh_0cad2546d001hjwGfwnKuk4W3H`). I'll acknowledge each progress message as it streams in — no polling.\n"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 281,
+        "output": 91,
+        "reasoning": 0,
+        "cache": {
+          "read": 7118,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_0cad2594a0012pmqWzDSPmiJ9v",
+      "metadata": {
+        "source": "opencode-perk-v2-spike",
+        "shellID": "sh_0cad2546d001hjwGfwnKuk4W3H",
+        "state": "running",
+        "cursor": 19
+      },
+      "time": {
+        "created": 1790109182013
+      },
+      "text": "Progress from shell sh_0cad2546d001hjwGfwnKuk4W3H:\nphase 1: preparing",
+      "description": "printf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'",
+      "type": "synthetic"
+    },
+    {
+      "id": "msg_0cad26841001Md9eRKWAJim7Us",
+      "time": {
+        "created": 1790109182021,
+        "streamed": 1790109184729,
+        "completed": 1790109184730
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B-oQ6",
+        "providerID": "omlx",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "\nProgress notification from background shell: \"Phase 1: Preparing\". The user is asking to briefly confirm each progress message. I shouldn't poll or execute any other tools. Just a simple confirmation should suffice.\n",
+          "state": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1790109182841,
+            "completed": 1790109184727
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\nAcknowledged: **phase 1: preparing** received."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 43,
+        "output": 58,
+        "reasoning": 0,
+        "cache": {
+          "read": 7490,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_0cad272dc001pgajxPXNBDNj3B",
+      "time": {
+        "created": 1790109184732
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_0cad277b9001q6m42rB5RBFPg5",
+      "metadata": {
+        "source": "opencode-perk-v2-spike",
+        "shellID": "sh_0cad2546d001hjwGfwnKuk4W3H",
+        "state": "running",
+        "cursor": 38
+      },
+      "time": {
+        "created": 1790109185982
+      },
+      "text": "Progress from shell sh_0cad2546d001hjwGfwnKuk4W3H:\nphase 2: compiling",
+      "description": "printf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'",
+      "type": "synthetic"
+    },
+    {
+      "id": "msg_0cad277c0001DU2q3LR17PHB7Z",
+      "time": {
+        "created": 1790109185988,
+        "streamed": 1790109187909,
+        "completed": 1790109187910
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B-oQ6",
+        "providerID": "omlx",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "\nProgress message from the background shell: \"Phase 2: Compiling\". I'll acknowledge it concisely.\n",
+          "state": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1790109186816,
+            "completed": 1790109187907
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\nAcknowledged: **phase 2: compiling** received."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 44,
+        "output": 39,
+        "reasoning": 0,
+        "cache": {
+          "read": 7591,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_0cad27f470029Cq5vQUBmIuYb8",
+      "time": {
+        "created": 1790109187911
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_0cad25470003lNi8QHVG4Vfxw3",
+      "metadata": {
+        "source": "shell",
+        "shellID": "sh_0cad2546d001hjwGfwnKuk4W3H",
+        "jobID": "sh_0cad2546d001hjwGfwnKuk4W3H",
+        "state": "completed",
+        "truncated": false,
+        "exit": 0
+      },
+      "time": {
+        "created": 1790109192978
+      },
+      "text": "<shell id=\"sh_0cad2546d001hjwGfwnKuk4W3H\" state=\"completed\" command=\"printf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'\">\nphase 1: preparing\nphase 2: compiling\nphase 3: complete\n\n</shell>",
+      "description": "printf 'phase 1: preparing\\n'; sleep 8; printf 'phase 2: compiling\\n'; sleep 8; printf 'phase 3: complete\\n'",
+      "type": "synthetic"
+    },
+    {
+      "id": "msg_0cad29316001pTQtPXNyPUFqJb",
+      "time": {
+        "created": 1790109192987,
+        "streamed": 1790109198311,
+        "completed": 1790109198312
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B-oQ6",
+        "providerID": "omlx",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "\nThe background shell completed with all three phases. The final phase 3 message has been delivered as part of the completion notification. The user asked me to briefly confirm each progress/completion message. The completion notification includes the full output: phase 1, phase 2, and phase 3: complete.\n\nI've already confirmed phases 1 and 2 via the progress messages. So now I'll confirm the completion.\n",
+          "state": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1790109194073,
+            "completed": 1790109198309
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\nCommand completed successfully. Full output received:\n\n- phase 1: preparing\n- phase 2: compiling\n- **phase 3: complete** ✓\n\nAll three phases streamed as expected — the perk V2 progress relay worked correctly."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 103,
+        "output": 138,
+        "reasoning": 0,
+        "cache": {
+          "read": 7674,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_0cad2a7e9001bT02wNf6Fs4pwF",
+      "time": {
+        "created": 1790109198313
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-v2",
+    "rootDir": "src-v2"
+  },
+  "include": ["src-v2"],
+  "exclude": ["dist", "dist-v2", "node_modules", ".opencode"]
+}

@@ -1,6 +1,7 @@
 # npm package: installed deps and compiled output (built on publish).
 node_modules/
 dist/
+dist-v2/
 
 # Opt-in self-demo: a local symlink that loads perk on this repo (see README).
 .opencode/
