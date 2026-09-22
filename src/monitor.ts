@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs"
 import { StringDecoder } from "node:string_decoder"
 import { fileState, readRange, size } from "./spool.js"
+import type { JobControl } from "./job.js"
+import { describeOutcome } from "./protocol.js"
 
 export type Listener = {
   inject: Injector
@@ -11,8 +13,9 @@ export type Listener = {
   err: string
   drip: string
   cancelPath: string
-  cancel: () => boolean
-  cancelSent: boolean
+  control: JobControl
+  timeoutMs: number
+  deadline: number
   pgid: number
   dripOffset: number
   dripSeen: number
@@ -45,10 +48,11 @@ export class Monitor {
 
   // One deterministic observation pass. Production supplies the interval;
   // tests call this directly to model growth, quiet windows, and completion.
-  tick(now = Date.now()) {
+  tick(now = performance.now()) {
     const fired: Fired[] = []
 
     for (const listener of this.listeners.values()) {
+      listener.control.observe(now)
       const currentDrip = fileState(listener.drip)
       const dripSize = currentDrip?.size ?? 0
       if (
@@ -85,10 +89,10 @@ export class Monitor {
       try {
         code = readFileSync(listener.exit, "utf8").trim() || "?"
       } catch {
-        if (!listener.cancelSent && existsSync(listener.cancelPath)) {
-          listener.cancelSent = true
-          const ok = listener.cancel()
-          this.logger("cancel requested", { pgid: listener.pgid, ok })
+        if (existsSync(listener.cancelPath)) {
+          listener.control.requestStop("cancelled", now)
+        } else if (now >= listener.deadline) {
+          listener.control.requestStop("timeout", now)
         }
         continue
       }
@@ -126,9 +130,7 @@ export class Monitor {
         })
       }
 
-      const outcome = code.startsWith("cancelled:")
-        ? `cancelled by ${code.slice("cancelled:".length) || "signal"}`
-        : `exited ${code}`
+      const outcome = describeOutcome(code, listener.timeoutMs)
       fired.push({
         inject: listener.inject,
         sessionID: listener.sessionID,

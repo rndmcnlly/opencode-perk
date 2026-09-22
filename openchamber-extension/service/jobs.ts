@@ -9,62 +9,17 @@ import {
   statSync,
 } from "node:fs"
 import { join } from "node:path"
+import { parseLaunch, type NormalizedLaunch, type VisibleJob } from "../../src/protocol.js"
+export type { VisibleJob } from "../../src/protocol.js"
 
 const JOB_ID = /^[0-9a-f]{8}$/
 const MAX_METADATA_BYTES = 64 * 1024
 
-type LaunchRecord = {
-  schema: 1
-  id: string
-  sessionId: string
-  label?: string
-  command: string
-  cwd: string
-  pgid: number
-  startedAt: string
-  expectedSeconds?: number
-}
-
-export type VisibleJob = {
-  id: string
-  label?: string
-  command: string
-  cwd: string
-  jobDir: string
-  pgid: number
-  startedAt: string
-  finishedAt?: string
-  expectedSeconds?: number
-  cancellationRequested: boolean
-  state: "running" | "completed"
-  outcome?: string
-}
-
-function readLaunch(path: string, expectedId: string): LaunchRecord | null {
+function readLaunch(path: string, expectedId: string): NormalizedLaunch | null {
   try {
     if (statSync(path).size > MAX_METADATA_BYTES) return null
     const value: unknown = JSON.parse(readFileSync(path, "utf8"))
-    if (!value || typeof value !== "object") return null
-    const candidate = value as Record<string, unknown>
-    if (
-      candidate.schema !== 1 ||
-      candidate.id !== expectedId ||
-      typeof candidate.sessionId !== "string" ||
-      (candidate.label !== undefined && typeof candidate.label !== "string") ||
-      typeof candidate.command !== "string" ||
-      typeof candidate.cwd !== "string" ||
-      typeof candidate.pgid !== "number" ||
-      !Number.isSafeInteger(candidate.pgid) ||
-      typeof candidate.startedAt !== "string" ||
-      !Number.isFinite(Date.parse(candidate.startedAt)) ||
-      (candidate.expectedSeconds !== undefined &&
-        (typeof candidate.expectedSeconds !== "number" ||
-          !Number.isFinite(candidate.expectedSeconds) ||
-          candidate.expectedSeconds <= 0))
-    ) {
-      return null
-    }
-    return candidate as LaunchRecord
+    return parseLaunch(value, expectedId)
   } catch {
     return null
   }
@@ -107,16 +62,8 @@ export function listJobs(spoolDir: string, sessionId: string): VisibleJob[] {
     if (!launch || launch.sessionId !== sessionId) continue
     const result = readOutcome(join(dir, "exit"))
     jobs.push({
-      id: launch.id,
-      ...(launch.label === undefined ? {} : { label: launch.label }),
-      command: launch.command,
-      cwd: launch.cwd,
+      ...launch,
       jobDir: dir,
-      pgid: launch.pgid,
-      startedAt: launch.startedAt,
-      ...(launch.expectedSeconds === undefined
-        ? {}
-        : { expectedSeconds: launch.expectedSeconds }),
       cancellationRequested: existsSync(join(dir, "cancel")),
       state: result === null ? "running" : "completed",
       ...(result === null ? {} : result),

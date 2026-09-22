@@ -11,6 +11,20 @@ import { join } from "node:path"
 import { afterEach, test } from "node:test"
 import { Monitor } from "../src/monitor.js"
 import { makeJobFiles, type JobFiles } from "../src/spool.js"
+import type { JobControl, StopReason } from "../src/job.js"
+
+function control(onStop: (reason: StopReason) => void = () => {}): JobControl {
+  let stopping = false
+  return {
+    finished: false,
+    observe() {},
+    requestStop(reason) {
+      if (stopping) return
+      stopping = true
+      onStop(reason)
+    },
+  }
+}
 
 const roots: string[] = []
 
@@ -48,8 +62,9 @@ function add(
     err: files.err,
     drip: files.drip,
     cancelPath: files.cancel,
-    cancel: () => true,
-    cancelSent: false,
+    control: control(),
+    timeoutMs: 3_600_000,
+    deadline: Number.POSITIVE_INFINITY,
     pgid: 123,
     dripOffset: 0,
     dripSeen: 0,
@@ -136,11 +151,12 @@ test("a cancellation marker signals its registered job exactly once", async () =
     err: files.err,
     drip: files.drip,
     cancelPath: files.cancel,
-    cancel: () => {
+    control: control((reason) => {
+      assert.equal(reason, "cancelled")
       cancellations += 1
-      return true
-    },
-    cancelSent: false,
+    }),
+    timeoutMs: 3_600_000,
+    deadline: Number.POSITIVE_INFINITY,
     pgid: 123,
     dripOffset: 0,
     dripSeen: 0,
@@ -154,6 +170,51 @@ test("a cancellation marker signals its registered job exactly once", async () =
   monitor.tick()
 
   assert.equal(cancellations, 1)
+})
+
+test("a timeout signals its job once and reports the deadline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "perk-timeout-test-"))
+  roots.push(root)
+  const files = makeJobFiles(join(root, "spool"))
+  const messages: string[] = []
+  let cancellations = 0
+  const monitor = new Monitor()
+  monitor.add({
+    inject: async (_sessionID, message) => {
+      messages.push(message)
+    },
+    sessionID: "session-1",
+    id: files.id,
+    exit: files.exit,
+    out: files.out,
+    err: files.err,
+    drip: files.drip,
+    cancelPath: files.cancel,
+    control: control((reason) => {
+      assert.equal(reason, "timeout")
+      cancellations += 1
+    }),
+    timeoutMs: 500,
+    deadline: 1_500,
+    pgid: 123,
+    dripOffset: 0,
+    dripSeen: 0,
+    dripIdentity: files.dripIdentity,
+    dripChangedAt: null,
+    quietMs: 1_000,
+  })
+
+  monitor.tick(1_499)
+  monitor.tick(1_500)
+  monitor.tick(1_501)
+  assert.equal(cancellations, 1)
+
+  writeFileSync(files.exit, "timeout\n")
+  monitor.tick(1_502)
+  await monitor.settled()
+  assert.deepEqual(messages, [
+    `Job ${files.id} timed out after 500 ms: out 0 bytes, err 0 bytes`,
+  ])
 })
 
 test("UTF-8 split across settled reads is decoded once complete", async () => {

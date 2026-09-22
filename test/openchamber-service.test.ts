@@ -32,13 +32,14 @@ function addJob(
 ) {
   const files = makeJobFiles(spool)
   writeLaunchRecord(files.launch, {
-    schema: 1,
+    schema: 2,
     id: files.id,
     sessionId,
     command: `sleep ${files.id}`,
     cwd: `/tmp/${sessionId}`,
     pgid: 123,
     startedAt,
+    timeoutMs: 3_600_000,
   })
   if (outcome !== undefined) writeFileSync(files.exit, `${outcome}\n`)
   return files
@@ -53,11 +54,13 @@ test("lists only jobs belonging to the requested session", () => {
   const jobs = listJobs(spool, "session-1")
   assert.deepEqual(jobs[0], {
     id: older.id,
+    sessionId: "session-1",
     command: `sleep ${older.id}`,
     cwd: "/tmp/session-1",
     jobDir: older.dir,
     pgid: 123,
     startedAt: "2026-09-17T12:00:00.000Z",
+    timeoutMs: 3_600_000,
     finishedAt: jobs[0].finishedAt,
     cancellationRequested: false,
     state: "completed",
@@ -68,11 +71,13 @@ test("lists only jobs belonging to the requested session", () => {
     jobs[1],
     {
       id: newer.id,
+      sessionId: "session-1",
       command: `sleep ${newer.id}`,
       cwd: "/tmp/session-1",
       jobDir: newer.dir,
       pgid: 123,
       startedAt: "2026-09-17T12:01:00.000Z",
+      timeoutMs: 3_600_000,
       cancellationRequested: false,
       state: "running",
     },
@@ -90,6 +95,37 @@ test("missing and malformed spool entries are ignored", () => {
   mkdirSync(join(spool, "not-a-job"))
 
   assert.deepEqual(listJobs(spool, "session-1"), [])
+})
+
+test("preserves timeout as a distinct visible outcome", () => {
+  const spool = temporarySpool()
+  const timedOut = addJob(
+    spool,
+    "session-1",
+    "2026-09-17T12:00:00.000Z",
+    "timeout",
+  )
+
+  const jobs = listJobs(spool, "session-1")
+  assert.equal(jobs[0].id, timedOut.id)
+  assert.equal(jobs[0].outcome, "timeout")
+})
+
+test("legacy jobs remain visible, readable, and cancellable without a fabricated timeout", () => {
+  const spool = temporarySpool()
+  const files = makeJobFiles(spool)
+  writeFileSync(files.launch, JSON.stringify({
+    schema: 1, id: files.id, sessionId: "legacy-session", command: "sleep 20",
+    cwd: "/tmp", pgid: 123, startedAt: "2026-09-17T12:00:00.000Z",
+    expectedSeconds: 0.25,
+  }))
+  writeFileSync(files.out, "legacy output")
+  const [job] = listJobs(spool, "legacy-session")
+  assert.equal(job.expectedMs, 250)
+  assert.equal(job.timeoutMs, undefined)
+  const chunk = readJobOutput(spool, files.id, "legacy-session", "stdout", 0)!
+  assert.equal(Buffer.from(chunk.data, "base64").toString(), "legacy output")
+  assert.deepEqual(requestCancellation(spool, files.id, "legacy-session"), { state: "requested" })
 })
 
 test("cancellation is session-scoped, idempotent, and refuses completed jobs", () => {

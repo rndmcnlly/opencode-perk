@@ -1,20 +1,6 @@
 import { connectHost } from "@openchamber/sdk"
 import { applyHostReady } from "@openchamber/sdk/ui"
-
-type VisibleJob = {
-  id: string
-  label?: string
-  command: string
-  cwd: string
-  jobDir: string
-  pgid: number
-  startedAt: string
-  finishedAt?: string
-  expectedSeconds?: number
-  cancellationRequested: boolean
-  state: "running" | "completed"
-  outcome?: string
-}
+import { describeOutcome, type VisibleJob } from "../../src/protocol.js"
 
 type OutputStream = "stdout" | "stderr" | "progress"
 
@@ -59,10 +45,12 @@ const MAX_OUTPUT_CHARS = 256 * 1024
 
 function duration(startedAt: string, finishedAt?: string): number {
   const end = finishedAt ? Date.parse(finishedAt) : Date.now()
-  return Math.max(0, Math.floor((end - Date.parse(startedAt)) / 1000))
+  return Math.max(0, end - Date.parse(startedAt))
 }
 
-function formatDuration(seconds: number): string {
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.floor(ms)}ms`
+  const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`
@@ -74,11 +62,11 @@ function status(job: VisibleJob): { label: string; tone: string } {
     return { label: "Stopping", tone: "running" }
   }
   if (job.state === "running") return { label: "Running", tone: "running" }
-  if (job.outcome === "0") return { label: "Exited 0", tone: "success" }
-  if (job.outcome?.startsWith("cancelled:")) {
-    return { label: `Cancelled ${job.outcome.slice(10)}`, tone: "failure" }
+  const outcome = describeOutcome(job.outcome ?? "?", job.timeoutMs)
+  return {
+    label: outcome[0].toUpperCase() + outcome.slice(1),
+    tone: job.outcome === "0" ? "success" : "failure",
   }
-  return { label: `Exited ${job.outcome ?? "?"}`, tone: "failure" }
 }
 
 function textElement(tag: string, className: string, text: string): HTMLElement {
@@ -241,22 +229,22 @@ function render() {
     stateLabel.className = "state"
     stateLabel.textContent = state.label
     const age = document.createElement("span")
-    const elapsedSeconds = duration(job.startedAt, job.finishedAt)
-    age.textContent = job.expectedSeconds
-      ? `${formatDuration(elapsedSeconds)} / ~${formatDuration(job.expectedSeconds)}`
-      : formatDuration(elapsedSeconds)
+    const elapsedMs = duration(job.startedAt, job.finishedAt)
+    age.textContent = job.expectedMs
+      ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}`
+      : formatDuration(elapsedMs)
     details.append(stateLabel, age)
     card.append(details)
 
-    if (job.state === "running" && job.expectedSeconds) {
+    if (job.state === "running" && job.expectedMs) {
       const budget = document.createElement("div")
-      const ratio = elapsedSeconds / job.expectedSeconds
+      const ratio = elapsedMs / job.expectedMs
       budget.className = `budget${ratio > 1 ? " overrun" : ""}`
       const fill = document.createElement("span")
       fill.style.width = `${Math.min(100, ratio * 100)}%`
       if (ratio < 1) {
         fill.className = "advancing"
-        fill.style.animationDuration = `${job.expectedSeconds - elapsedSeconds}s`
+        fill.style.animationDuration = `${job.expectedMs - elapsedMs}ms`
       }
       budget.append(fill)
       card.append(budget)

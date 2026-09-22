@@ -176,13 +176,13 @@ the job exits.
 
 ## Test 9: a per-call interval changes segmentation
 
-Call `bash_background` with `coalesce_seconds` = `3` and `command` =
+Call `bash_background` with `coalesce_ms` = `3000` and `command` =
 `echo first >> "$PERK_DRIP"; sleep 1; echo second >> "$PERK_DRIP"; sleep 20`.
 End your turn.
 
 **Pass:** one spike containing both `first` and `second` arrives after the
-second write, rather than two spikes. Omitting `coalesce_seconds` uses `1.0`;
-values below the pinned `0.3` minimum are clamped to `0.3`.
+second write, rather than two spikes. Omitting `coalesce_ms` uses `1000`;
+values below the pinned `300` minimum are clamped to `300`.
 
 ## Test 10: drip plus exit ordering (optional)
 
@@ -224,6 +224,23 @@ End your turn.
 and `after` arrives from the new file. Replacement is not supported framing; the
 test verifies that violating the append-only contract is visible and coherent.
 
+## Test 13: workdir matches native bash
+
+Call `bash_background` with `workdir` set to a known directory and `command` =
+`pwd`. After completion, read the returned `out` file.
+
+**Pass:** `out` contains the selected directory, not the session directory.
+
+## Test 14: timeout terminates the process group
+
+Call `bash_background` with `timeout` = `1000` and `command` = `sleep 20`.
+End your turn.
+
+**Pass:** the completion turn reports `timed out after 1000 ms` promptly, the
+returned `exit` file contains `timeout`, and the OpenChamber panel labels the job
+**Timed out** rather than waiting 20 seconds or describing the deadline as a
+user cancellation.
+
 ---
 
 ## Cleanup
@@ -251,6 +268,8 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
   expected, or did the segmentation surprise you?
 - Did cancellation publish `cancelled:TERM` and resolve the same exit-file gate
   used for normal completion?
+- Did `workdir` select the command directory and did `timeout` report a distinct
+  millisecond deadline outcome?
 - Anything about `bash_background` (its required `command` arg with no paths
   to choose; its optional display and coalescing hints; the command recorded
   verbatim in your own tool call, *not* echoed
@@ -264,8 +283,10 @@ any jobs you started and did not let finish via `kill -TERM -<pgid>`.
 - Fire-and-forget that returns immediately and reports exit code + output sizes
   on its own (Tests 1, 2, 3).
 - A correct foreground completion gate on the rendezvous file: the headless wait
-  with no plugin machinery (Tests 4, 6).
+  keeps the supervising runtime alive (Tests 4, 6).
 - A working kill handle for the whole job tree (Test 5).
 - A continuous drip stream from one job: interim spikes delivered while running,
   coalesced by quiet gaps, each identifying its job, with the tail never lost on
   exit and split UTF-8 preserved (Tests 7–12).
+- Native-shell symmetry for working-directory selection, with a deliberately
+  longer 3600000 ms background execution deadline (Tests 13–14).

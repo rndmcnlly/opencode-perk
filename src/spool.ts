@@ -14,6 +14,8 @@ import {
 import { randomBytes } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { LaunchRecord } from "./protocol.js"
+export type { LaunchRecord } from "./protocol.js"
 
 export const OPENCODE_TMP_DIR = join(tmpdir(), "opencode")
 export const SPOOL_DIR = join(OPENCODE_TMP_DIR, "perk")
@@ -25,23 +27,12 @@ export type JobFiles = {
   dir: string
   launch: string
   cancel: string
+  result: string
   exit: string
   out: string
   err: string
   drip: string
   dripIdentity: string
-}
-
-export type LaunchRecord = {
-  schema: 1
-  id: string
-  sessionId: string
-  label?: string
-  command: string
-  cwd: string
-  pgid: number
-  startedAt: string
-  expectedSeconds?: number
 }
 
 export function size(path: string): number {
@@ -130,6 +121,7 @@ export function makeJobFiles(spoolDir = SPOOL_DIR): JobFiles {
         dir,
         launch: join(dir, "launch.json"),
         cancel: join(dir, "cancel"),
+        result: join(dir, "result"),
         exit: join(dir, "exit"),
         out: join(dir, "out"),
         err: join(dir, "err"),

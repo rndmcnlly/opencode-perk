@@ -1114,6 +1114,16 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
 .oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
 `;
 
+  // src/protocol.ts
+  function describeOutcome(code, timeoutMs) {
+    if (code === "timeout") {
+      return timeoutMs === void 0 ? "timed out" : `timed out after ${timeoutMs} ms`;
+    }
+    if (code === "shutdown") return "stopped on shutdown";
+    if (code.startsWith("cancelled:")) return `cancelled by ${code.slice(10) || "signal"}`;
+    return `exited ${code}`;
+  }
+
   // openchamber-extension/panel/main.ts
   var host = connectHost();
   var jobsRoot = document.querySelector("#jobs");
@@ -1132,9 +1142,11 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var MAX_OUTPUT_CHARS = 256 * 1024;
   function duration(startedAt, finishedAt) {
     const end = finishedAt ? Date.parse(finishedAt) : Date.now();
-    return Math.max(0, Math.floor((end - Date.parse(startedAt)) / 1e3));
+    return Math.max(0, end - Date.parse(startedAt));
   }
-  function formatDuration(seconds) {
+  function formatDuration(ms) {
+    if (ms < 1e3) return `${Math.floor(ms)}ms`;
+    const seconds = Math.floor(ms / 1e3);
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
@@ -1145,11 +1157,11 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       return { label: "Stopping", tone: "running" };
     }
     if (job.state === "running") return { label: "Running", tone: "running" };
-    if (job.outcome === "0") return { label: "Exited 0", tone: "success" };
-    if (job.outcome?.startsWith("cancelled:")) {
-      return { label: `Cancelled ${job.outcome.slice(10)}`, tone: "failure" };
-    }
-    return { label: `Exited ${job.outcome ?? "?"}`, tone: "failure" };
+    const outcome = describeOutcome(job.outcome ?? "?", job.timeoutMs);
+    return {
+      label: outcome[0].toUpperCase() + outcome.slice(1),
+      tone: job.outcome === "0" ? "success" : "failure"
+    };
   }
   function textElement(tag, className, text) {
     const element = document.createElement(tag);
@@ -1294,19 +1306,19 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       stateLabel.className = "state";
       stateLabel.textContent = state.label;
       const age = document.createElement("span");
-      const elapsedSeconds = duration(job.startedAt, job.finishedAt);
-      age.textContent = job.expectedSeconds ? `${formatDuration(elapsedSeconds)} / ~${formatDuration(job.expectedSeconds)}` : formatDuration(elapsedSeconds);
+      const elapsedMs = duration(job.startedAt, job.finishedAt);
+      age.textContent = job.expectedMs ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}` : formatDuration(elapsedMs);
       details.append(stateLabel, age);
       card.append(details);
-      if (job.state === "running" && job.expectedSeconds) {
+      if (job.state === "running" && job.expectedMs) {
         const budget = document.createElement("div");
-        const ratio = elapsedSeconds / job.expectedSeconds;
+        const ratio = elapsedMs / job.expectedMs;
         budget.className = `budget${ratio > 1 ? " overrun" : ""}`;
         const fill = document.createElement("span");
         fill.style.width = `${Math.min(100, ratio * 100)}%`;
         if (ratio < 1) {
           fill.className = "advancing";
-          fill.style.animationDuration = `${job.expectedSeconds - elapsedSeconds}s`;
+          fill.style.animationDuration = `${job.expectedMs - elapsedMs}ms`;
         }
         budget.append(fill);
         card.append(budget);

@@ -1,5 +1,7 @@
 import { rmSync } from "node:fs"
-import { killJob, spawnBackground } from "./job.js"
+import { setTimeout as delay } from "node:timers/promises"
+import { ManagedJob, spawnBackground, type JobControl } from "./job.js"
+import { DEFAULT_TIMEOUT_MS, DEFAULT_COALESCE_MS, MIN_COALESCE_MS } from "./protocol.js"
 import { log } from "./log.js"
 import { Monitor, type Injector } from "./monitor.js"
 import {
@@ -11,16 +13,25 @@ import {
 } from "./spool.js"
 
 export const POLL_MS = 300
-export const DEFAULT_COALESCE_SECONDS = 1
-export const MIN_COALESCE_SECONDS = 0.3
 
 export type JobHandle = { id: string; dir: string; pgid: number }
+type LaunchOptions = {
+  command: string
+  cwd: string
+  sessionID: string
+  inject: Injector
+  timeoutMs?: number
+  label?: string
+  expectedMs?: number
+  coalesceMs?: number
+}
 
 export class PerkRuntime {
   readonly monitor = new Monitor(log)
   private pollTimer: NodeJS.Timeout | null = null
   private sweepTimer: NodeJS.Timeout | null = null
   private disposed = false
+  private launches = new Set<Promise<JobHandle>>()
 
   start() {
     this.disposed = false
@@ -35,23 +46,37 @@ export class PerkRuntime {
     }
   }
 
-  async launch(
-    command: string,
-    cwd: string,
-    sessionID: string,
-    inject: Injector,
-    coalesceSeconds = DEFAULT_COALESCE_SECONDS,
-    label?: string,
-    expectedSeconds?: number,
-  ): Promise<JobHandle> {
+  launch(options: LaunchOptions): Promise<JobHandle> {
+    const pending = this.launchJob(options)
+    this.launches.add(pending)
+    void pending.then(
+      () => this.launches.delete(pending),
+      () => this.launches.delete(pending),
+    )
+    return pending
+  }
+
+  private async launchJob(options: LaunchOptions): Promise<JobHandle> {
+    const {
+      command,
+      cwd,
+      sessionID,
+      inject,
+      timeoutMs = DEFAULT_TIMEOUT_MS,
+      label,
+      expectedMs,
+      coalesceMs = DEFAULT_COALESCE_MS,
+    } = options
     if (this.disposed) throw new Error("perk runtime is disposed")
     const files = makeJobFiles()
     const startedAt = new Date().toISOString()
-    let pgid: number | undefined
+    const startedMono = performance.now()
+    let control: ManagedJob | undefined
     try {
-      pgid = await spawnBackground(command, files, cwd)
+      const pgid = await spawnBackground(command, files, cwd)
+      control = new ManagedJob(pgid, files)
       writeLaunchRecord(files.launch, {
-        schema: 1,
+        schema: 2,
         id: files.id,
         sessionId: sessionID,
         ...(label === undefined ? {} : { label }),
@@ -59,10 +84,11 @@ export class PerkRuntime {
         cwd,
         pgid,
         startedAt,
-        ...(expectedSeconds === undefined ? {} : { expectedSeconds }),
+        timeoutMs,
+        ...(expectedMs === undefined ? {} : { expectedMs }),
       })
     } catch (error) {
-      if (pgid !== undefined) killJob(pgid)
+      if (control) await this.stopAndWait(control)
       rmSync(files.dir, { recursive: true, force: true })
       throw error
     }
@@ -70,9 +96,11 @@ export class PerkRuntime {
     // Disposal can run while the detached child is reaching its spawn event.
     // Reap it here rather than registering it into a stopped monitor.
     if (this.disposed) {
-      killJob(pgid)
+      await this.stopAndWait(control)
       throw new Error("perk runtime was disposed while launching the job")
     }
+
+    const pgid = control.pgid
 
     this.monitor.add({
       inject,
@@ -83,14 +111,15 @@ export class PerkRuntime {
       err: files.err,
       drip: files.drip,
       cancelPath: files.cancel,
-      cancel: () => killJob(pgid),
-      cancelSent: false,
+      control,
+      timeoutMs,
+      deadline: startedMono + timeoutMs,
       pgid,
       dripOffset: 0,
       dripSeen: 0,
       dripIdentity: files.dripIdentity,
       dripChangedAt: null,
-      quietMs: Math.max(coalesceSeconds, MIN_COALESCE_SECONDS) * 1000,
+      quietMs: Math.max(coalesceMs, MIN_COALESCE_MS),
     })
     log("bash_background: spawned", { id: files.id, pgid, dir: files.dir, cwd })
     return { id: files.id, dir: files.dir, pgid }
@@ -98,16 +127,24 @@ export class PerkRuntime {
 
   async dispose() {
     this.disposed = true
-    for (const listener of this.monitor.listeners.values()) {
-      const ok = killJob(listener.pgid)
-      log("dispose reap", { id: listener.id, pgid: listener.pgid, ok })
-    }
-    this.monitor.clear()
     if (this.pollTimer) clearInterval(this.pollTimer)
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.pollTimer = null
     this.sweepTimer = null
+    await Promise.all([
+      ...[...this.monitor.listeners.values()].map(({ control }) => this.stopAndWait(control)),
+      ...[...this.launches].map((launch) => launch.catch(() => {})),
+    ])
+    this.monitor.clear()
     await this.monitor.settled()
+  }
+
+  private async stopAndWait(control: JobControl) {
+    control.requestStop("shutdown", performance.now())
+    while (!control.finished) {
+      await delay(20)
+      control.observe(performance.now())
+    }
   }
 
   private sweep() {

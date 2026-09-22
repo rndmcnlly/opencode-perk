@@ -1,6 +1,6 @@
 {
   "name": "opencode-perk",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A minimal afferent channel for a harnessed model: fire a background job, get woken with a conversational turn when it finishes.",
   "keywords": [
     "opencode",
@@ -41,7 +41,7 @@
     "typecheck:extension": "tsc -p openchamber-extension/tsconfig.json",
     "clean": "rm -rf dist",
     "test": "tsx --test test/*.test.ts",
-    "check": "npm run build && npm run typecheck:extension && npm run build:extension && npm test",
+    "check": "npm run build && tsc -p tsconfig.check.json && npm run typecheck:extension && npm run build:extension && npm test",
     "refresh:opencode": "rm -rf \"${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/opencode-perk@latest\"",
     "prepack": "npm run clean && npm run build"
   },

@@ -4,6 +4,11 @@ This is a local companion to `opencode-perk`. It shows jobs from the conversatio
 currently open in OpenChamber. Perk remains responsible for job execution and
 completion messages.
 
+The service and panel share `src/protocol.ts` with the plugin. New launch
+records use schema 2 and millisecond durations. Legacy schema-1 records remain
+visible; their estimates are converted from seconds and absent deadlines remain
+unspecified. Timeout, cancellation, and shutdown are distinct terminal outcomes.
+
 Running jobs can be cancelled from the panel. The service records a cancellation
 request in the private spool; only the perk runtime that owns the job may signal
 its process group. Dismissing a completed card affects only this extension's

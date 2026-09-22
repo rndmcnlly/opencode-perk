@@ -1,6 +1,8 @@
 import { tool } from "@opencode-ai/plugin"
+import { resolve } from "node:path"
 import type { Injector } from "./monitor.js"
 import type { PerkRuntime } from "./runtime.js"
+import { DEFAULT_TIMEOUT_MS, DEFAULT_COALESCE_MS, MIN_COALESCE_MS } from "./protocol.js"
 
 const description =
   "Run a shell command as a detached background job and return immediately. " +
@@ -9,9 +11,9 @@ const description =
   "nohup, &, disown, redirection, or output paths. perk returns the job's pgid " +
   "and <job-dir>/{out,err,drip,exit}, then injects its exit result and captured " +
   "output sizes on completion. For interim progress, append messages to " +
-  "$PERK_DRIP. After no new writes for coalesce_seconds, perk delivers the " +
-  "accumulated text as one spike (default 1.0 seconds; values below 0.3 are " +
-  "clamped). Stop a job with " +
+  "$PERK_DRIP. After no new writes for coalesce_ms, perk delivers the " +
+  `accumulated text as one spike (default ${DEFAULT_COALESCE_MS} ms; values below ${MIN_COALESCE_MS} are ` +
+  `clamped). Timeout defaults to ${DEFAULT_TIMEOUT_MS} ms. Stop a job with ` +
   "`kill -TERM -<pgid>`; the leading minus targets its process group. In an " +
   "interactive session, end your turn and wait for injected events. In " +
   "headless `opencode run`, wait in foreground bash on the returned exit file " +
@@ -31,13 +33,21 @@ export function createBackgroundTool(runtime: PerkRuntime, inject: Injector) {
           "(a human-style label) will be run and fail the job, and a line " +
           "you EXPECT to fail must opt out with `|| true`.",
       ),
-      coalesce_seconds: tool.schema
+      timeout: tool.schema
         .number()
+        .int()
+        .positive()
         .optional()
         .describe(
-          "Quiet time in seconds before accumulated $PERK_DRIP writes are " +
-            "delivered as one spike. Defaults to 1.0; values below 0.3 are " +
-            "clamped.",
+          "Maximum runtime in milliseconds before the job's process group is " +
+            `sent TERM, then KILL after a short grace period if needed. Defaults to ${DEFAULT_TIMEOUT_MS} (one hour).`,
+        ),
+      workdir: tool.schema
+        .string()
+        .optional()
+        .describe(
+          "The working directory to run the command in. Defaults to the " +
+            "current session directory.",
         ),
       label: tool.schema
         .string()
@@ -48,26 +58,38 @@ export function createBackgroundTool(runtime: PerkRuntime, inject: Injector) {
             "Used as its display label; omit when the command is already " +
             "self-explanatory.",
         ),
-      expected_seconds: tool.schema
+      expected_ms: tool.schema
         .number()
+        .int()
         .positive()
         .optional()
         .describe(
-          "Approximate wall-clock duration for display only. This does not " +
-            "impose a timeout. Omit it when duration is not meaningfully " +
+          "Approximate wall-clock duration in milliseconds for display only. " +
+            "This does not impose a timeout. Omit it when duration is not meaningfully " +
             "predictable.",
+        ),
+      coalesce_ms: tool.schema
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Quiet time in milliseconds before accumulated $PERK_DRIP writes " +
+            `are delivered as one spike. Defaults to ${DEFAULT_COALESCE_MS}; values below ${MIN_COALESCE_MS} ` +
+            "are clamped.",
         ),
     },
     async execute(args, ctx) {
-      const job = await runtime.launch(
-        args.command,
-        ctx.directory,
-        ctx.sessionID,
+      const job = await runtime.launch({
+        command: args.command,
+        cwd: resolve(ctx.directory, args.workdir ?? "."),
+        sessionID: ctx.sessionID,
         inject,
-        args.coalesce_seconds,
-        args.label,
-        args.expected_seconds,
-      )
+        timeoutMs: args.timeout,
+        label: args.label,
+        expectedMs: args.expected_ms,
+        coalesceMs: args.coalesce_ms,
+      })
       return (
         `Backgrounded ${job.id} (detached, pgid ${job.pgid}). ` +
         `Files: ${job.dir}/{out,err,drip,exit}. ` +

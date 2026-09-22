@@ -15,18 +15,42 @@ import {
   statSync
 } from "node:fs";
 import { join } from "node:path";
+
+// src/protocol.ts
+function positiveInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+function parseLaunch(value, expectedId) {
+  if (!value || typeof value !== "object") return null;
+  const v = value;
+  if (v.schema !== 1 && v.schema !== 2 || v.id !== expectedId || typeof v.sessionId !== "string" || v.label !== void 0 && typeof v.label !== "string" || typeof v.command !== "string" || typeof v.cwd !== "string" || !positiveInteger(v.pgid) || typeof v.startedAt !== "string" || !Number.isFinite(Date.parse(v.startedAt)) || v.schema === 2 && !positiveInteger(v.timeoutMs) || v.timeoutMs !== void 0 && !positiveInteger(v.timeoutMs) || v.expectedMs !== void 0 && !positiveInteger(v.expectedMs)) return null;
+  let expectedMs = v.expectedMs;
+  if (v.schema === 1 && expectedMs === void 0 && v.expectedSeconds !== void 0) {
+    if (typeof v.expectedSeconds !== "number" || !Number.isFinite(v.expectedSeconds) || v.expectedSeconds <= 0) return null;
+    expectedMs = Math.max(1, Math.round(v.expectedSeconds * 1e3));
+    if (!positiveInteger(expectedMs)) return null;
+  }
+  return {
+    id: expectedId,
+    sessionId: v.sessionId,
+    ...v.label === void 0 ? {} : { label: v.label },
+    command: v.command,
+    cwd: v.cwd,
+    pgid: v.pgid,
+    startedAt: v.startedAt,
+    ...v.timeoutMs === void 0 ? {} : { timeoutMs: v.timeoutMs },
+    ...expectedMs === void 0 ? {} : { expectedMs }
+  };
+}
+
+// openchamber-extension/service/jobs.ts
 var JOB_ID = /^[0-9a-f]{8}$/;
 var MAX_METADATA_BYTES = 64 * 1024;
 function readLaunch(path, expectedId) {
   try {
     if (statSync(path).size > MAX_METADATA_BYTES) return null;
     const value = JSON.parse(readFileSync(path, "utf8"));
-    if (!value || typeof value !== "object") return null;
-    const candidate = value;
-    if (candidate.schema !== 1 || candidate.id !== expectedId || typeof candidate.sessionId !== "string" || candidate.label !== void 0 && typeof candidate.label !== "string" || typeof candidate.command !== "string" || typeof candidate.cwd !== "string" || typeof candidate.pgid !== "number" || !Number.isSafeInteger(candidate.pgid) || typeof candidate.startedAt !== "string" || !Number.isFinite(Date.parse(candidate.startedAt)) || candidate.expectedSeconds !== void 0 && (typeof candidate.expectedSeconds !== "number" || !Number.isFinite(candidate.expectedSeconds) || candidate.expectedSeconds <= 0)) {
-      return null;
-    }
-    return candidate;
+    return parseLaunch(value, expectedId);
   } catch {
     return null;
   }
@@ -65,14 +89,8 @@ function listJobs(spoolDir2, sessionId) {
     if (!launch || launch.sessionId !== sessionId) continue;
     const result = readOutcome(join(dir, "exit"));
     jobs.push({
-      id: launch.id,
-      ...launch.label === void 0 ? {} : { label: launch.label },
-      command: launch.command,
-      cwd: launch.cwd,
+      ...launch,
       jobDir: dir,
-      pgid: launch.pgid,
-      startedAt: launch.startedAt,
-      ...launch.expectedSeconds === void 0 ? {} : { expectedSeconds: launch.expectedSeconds },
       cancellationRequested: existsSync(join(dir, "cancel")),
       state: result === null ? "running" : "completed",
       ...result === null ? {} : result

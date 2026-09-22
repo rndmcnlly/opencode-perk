@@ -3,7 +3,7 @@
 ## What this is
 
 `opencode-perk` is an opencode plugin published to npm. It adds one tool,
-`bash_background({ command, label?, expected_seconds?, coalesce_seconds? })`,
+`bash_background({ command, timeout?, workdir?, label?, expected_ms?, coalesce_ms? })`,
 that runs a shell command as a detached
 fire-and-forget job and returns immediately. When the job finishes, perk injects
 a conversational turn into the idle session reporting the exit code and the byte
@@ -19,7 +19,8 @@ src/index.ts     Thin OpenCode adapter and named/default exports.
 src/tool.ts      Tool schema, description, and execution adapter.
 src/runtime.ts   Job orchestration, timers, singleton lifecycle, disposal.
 src/monitor.ts   Deterministic drip/exit observation and ordered delivery.
-src/job.ts       Shell wrapper, detached spawn, process-group termination.
+src/job.ts       Shell result, detached spawn, termination state and escalation.
+src/protocol.ts  Shared versioned records, legacy decoding, outcome semantics.
 src/spool.ts     Secure job files, byte reads, and retention sweep.
 src/log.ts       Optional private file logging.
 test/            Node test suite, run as TypeScript through tsx.
@@ -53,6 +54,11 @@ npm run check    build modules + standalone bundle, then test
 npm run clean    rm -rf dist
 prepack          clean + build (runs on npm pack and npm publish)
 ```
+
+`npm run check` also typechecks tests and the extension and builds its bundles.
+The shell writes `result`; only the runtime publishes the authoritative `exit`
+gate. Owned stop requests preserve their first reason and escalate TERM to KILL
+after 1000 ms. New launch records use schema 2; observers normalize schema 1.
 
 Publishing: the agent should NOT run `npm publish`. The npm account has 2FA, so
 publish needs a one-time password (the CLI errors with `EOTP` mid-publish and an

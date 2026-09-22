@@ -49,13 +49,14 @@ test("makeJobFiles creates a private job directory and drip fiber", () => {
 test("launch record is published privately and atomically", () => {
   const files = makeJobFiles(temporarySpool())
   const metadata = {
-    schema: 1 as const,
+    schema: 2 as const,
     id: files.id,
     sessionId: "session-1",
     command: "sleep 20",
     cwd: "/tmp/project",
     pgid: 123,
     startedAt: "2026-09-17T12:00:00.000Z",
+    timeoutMs: 3_600_000,
   }
 
   writeLaunchRecord(files.launch, metadata)
