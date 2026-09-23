@@ -15,7 +15,7 @@ function iso(time: number): string {
 }
 
 function activeJob(now: number): VisibleJob {
-  const naturalFinish = previewStartedAt + 22_000
+  const naturalFinish = previewStartedAt + 600_000
   const cancelledFinish = cancellationRequestedAt === null ? Infinity : cancellationRequestedAt + 800
   const finishedAt = Math.min(naturalFinish, cancelledFinish)
   const completed = now >= finishedAt

@@ -1133,7 +1133,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return new Date(time).toISOString();
   }
   function activeJob(now) {
-    const naturalFinish = previewStartedAt + 22e3;
+    const naturalFinish = previewStartedAt + 6e5;
     const cancelledFinish = cancellationRequestedAt === null ? Infinity : cancellationRequestedAt + 800;
     const finishedAt = Math.min(naturalFinish, cancelledFinish);
     const completed = now >= finishedAt;
@@ -1290,7 +1290,19 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
 
   // openchamber-extension/panel/main.ts
   var host = new URLSearchParams(location.search).has("mock") ? createMockHost() : connectHost();
+  var previewStyle = new URLSearchParams(location.search).get("style");
+  if (new URLSearchParams(location.search).has("mock") && ["quiet", "rail", "console"].includes(previewStyle ?? "")) {
+    document.documentElement.dataset.previewStyle = previewStyle;
+    if (new URLSearchParams(location.search).get("theme") === "light") {
+      document.documentElement.dataset.previewTheme = "light";
+    }
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "preview-styles.css";
+    document.head.append(stylesheet);
+  }
   var jobsRoot = document.querySelector("#jobs");
+  var toolbar = document.querySelector("#toolbar");
   var message = document.querySelector("#message");
   var notice = document.querySelector("#notice");
   var sessionId2 = null;
@@ -1298,10 +1310,11 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var jobs2 = [];
   var collapseStateReady = false;
   var collapsed = /* @__PURE__ */ new Set();
-  var expanded = /* @__PURE__ */ new Set();
+  var autoCollapse = false;
   var selectedOutput = /* @__PURE__ */ new Map();
   var streamStates = /* @__PURE__ */ new Map();
   var programScroll = /* @__PURE__ */ new Map();
+  var titleScroll = /* @__PURE__ */ new Map();
   var confirmStop = null;
   var MAX_OUTPUT_CHARS = 256 * 1024;
   function duration(startedAt, finishedAt) {
@@ -1348,12 +1361,55 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (!sessionId2) return;
     await host.storage.set(storageKey(sessionId2), [...collapsed]);
   }
+  function renderToolbar() {
+    toolbar.hidden = jobs2.length === 0;
+    toolbar.replaceChildren();
+    if (!jobs2.length) return;
+    const title = textElement("span", "toolbar-title", "Background jobs");
+    const controls = document.createElement("div");
+    controls.className = "toolbar-controls";
+    const expand = document.createElement("button");
+    expand.textContent = "Expand all";
+    expand.disabled = jobs2.every((job) => !collapsed.has(job.id));
+    expand.addEventListener("click", () => {
+      collapsed.clear();
+      render();
+      void saveCollapsed().catch((error) => showNotice(`Could not save collapsed cards: ${String(error)}`));
+    });
+    const collapse = document.createElement("button");
+    collapse.textContent = "Collapse all";
+    collapse.disabled = jobs2.every((job) => collapsed.has(job.id));
+    collapse.addEventListener("click", () => {
+      collapsed = new Set(jobs2.map((job) => job.id));
+      render();
+      void saveCollapsed().catch((error) => showNotice(`Could not save collapsed cards: ${String(error)}`));
+    });
+    const automatic = document.createElement("button");
+    automatic.className = "auto-collapse";
+    automatic.textContent = "Auto-collapse";
+    automatic.title = "Collapse running jobs when they finish";
+    automatic.setAttribute("aria-pressed", String(autoCollapse));
+    automatic.addEventListener("click", () => {
+      autoCollapse = !autoCollapse;
+      renderToolbar();
+      void host.storage.set("auto-collapse-completed", autoCollapse).catch(
+        (error) => showNotice(`Could not save auto-collapse preference: ${String(error)}`)
+      );
+    });
+    controls.append(expand, collapse, automatic);
+    toolbar.append(title, controls);
+  }
   function showNotice(text) {
     notice.textContent = text;
     notice.style.display = text ? "block" : "none";
   }
   function detailRow(list, term, value) {
     list.append(textElement("dt", "", term), textElement("dd", "", value));
+  }
+  function updateTitleFade(title) {
+    const remaining = title.scrollWidth - title.clientWidth - title.scrollLeft;
+    title.style.setProperty("--title-fade-left", title.scrollLeft > 1 ? "16px" : "0px");
+    title.style.setProperty("--title-fade-right", remaining > 1 ? "16px" : "0px");
   }
   function streamKey(jobId, stream) {
     return `${jobId}:${stream}`;
@@ -1371,6 +1427,8 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         complete: false,
         followTail: true,
         scrollTop: 0,
+        scrollLeft: 0,
+        restoring: false,
         element: null,
         error: null
       };
@@ -1381,11 +1439,19 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function paintOutput(state) {
     const element = state.element;
     if (!element) return;
+    if (element.isConnected && element.dataset.painted && !state.restoring) {
+      state.scrollLeft = element.scrollLeft;
+      if (!state.followTail) state.scrollTop = element.scrollTop;
+    }
+    state.restoring = true;
     element.textContent = state.error ? `Could not read output: ${state.error}` : state.text || (state.complete ? "(no output)" : "Waiting for output...");
+    element.dataset.painted = "true";
     requestAnimationFrame(() => {
       if (state.element !== element) return;
       if (state.followTail) element.scrollTop = element.scrollHeight;
       else element.scrollTop = state.scrollTop;
+      element.scrollLeft = state.scrollLeft;
+      state.restoring = false;
     });
   }
   function decodeBase64(value) {
@@ -1444,17 +1510,45 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
     }
   }
   function render() {
+    const focusedJobId = document.activeElement instanceof HTMLElement && document.activeElement.classList.contains("card-header") ? document.activeElement.dataset.jobId : null;
+    jobsRoot.querySelectorAll(".job").forEach((card) => {
+      const id = card.dataset.jobId;
+      if (!id || card.dataset.sessionId !== sessionId2) return;
+      if (card.classList.contains("collapsed")) {
+        const title = card.querySelector(".task-summary");
+        if (title) titleScroll.set(id, title.scrollLeft);
+        return;
+      }
+      const program = card.querySelector(".program");
+      if (program) programScroll.set(id, { top: program.scrollTop, left: program.scrollLeft });
+      const output2 = card.querySelector(".output-view");
+      const stream = output2?.dataset.stream;
+      if (output2 && stream) {
+        const state = streamState(id, stream);
+        if (!state.restoring) {
+          state.scrollTop = output2.scrollTop;
+          state.scrollLeft = output2.scrollLeft;
+        }
+      }
+    });
     jobsRoot.replaceChildren();
+    renderToolbar();
     message.hidden = jobs2.length > 0;
     message.textContent = "No background jobs in this conversation.";
     for (const job of jobs2) {
       const state = status(job);
       const elapsedMs = duration(job.startedAt, job.finishedAt);
       const card = document.createElement("article");
+      card.dataset.jobId = job.id;
+      card.dataset.sessionId = sessionId2 ?? "";
       const isCollapsed = collapsed.has(job.id);
       card.className = `job ${state.tone}${isCollapsed ? " collapsed" : ""}`;
       const header = document.createElement("header");
       header.className = "card-header";
+      header.dataset.jobId = job.id;
+      header.tabIndex = 0;
+      header.setAttribute("role", "button");
+      header.setAttribute("aria-expanded", String(!isCollapsed));
       const statusLine = document.createElement("div");
       statusLine.className = "status-line";
       const stateLabel = textElement("span", "state", state.label);
@@ -1464,17 +1558,45 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
         job.expectedMs ? `${formatDuration(elapsedMs)} / ~${formatDuration(job.expectedMs)}` : formatDuration(elapsedMs)
       );
       statusLine.append(stateLabel, age);
+      if (job.state === "running") {
+        const stop = document.createElement("button");
+        stop.className = "stop-control danger";
+        const confirming = confirmStop?.id === job.id && confirmStop.until > Date.now();
+        stop.textContent = job.cancellationRequested ? "Stopping" : confirming ? "Confirm stop" : "Stop";
+        stop.disabled = job.cancellationRequested;
+        stop.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (!sessionId2 || job.cancellationRequested) return;
+          if (!confirming) {
+            confirmStop = { id: job.id, until: Date.now() + 1e4 };
+            render();
+            return;
+          }
+          confirmStop = null;
+          stop.disabled = true;
+          void host.serviceRequest({
+            method: "POST",
+            path: `/jobs/${job.id}/cancel`,
+            query: { session: sessionId2 }
+          }).then(() => refresh()).catch((error) => {
+            showNotice(
+              `Could not request cancellation: ${error instanceof Error ? error.message : String(error)}`
+            );
+            render();
+          });
+        });
+        statusLine.append(stop);
+      }
       const taskSummary = document.createElement("div");
       taskSummary.className = "task-summary";
       taskSummary.textContent = job.label?.trim() || job.command.split("\n").find((line) => line.trim())?.trim() || "Unnamed job";
-      taskSummary.title = taskSummary.textContent;
-      header.append(statusLine, taskSummary);
-      card.append(header);
-      const collapseToggle = document.createElement("button");
-      collapseToggle.className = "collapse-toggle";
-      collapseToggle.textContent = isCollapsed ? "Expand" : "Collapse";
-      collapseToggle.setAttribute("aria-expanded", String(!isCollapsed));
-      collapseToggle.addEventListener("click", () => {
+      taskSummary.addEventListener("scroll", () => {
+        if (!taskSummary.isConnected || !isCollapsed) return;
+        titleScroll.set(job.id, taskSummary.scrollLeft);
+        updateTitleFade(taskSummary);
+      });
+      header.setAttribute("aria-label", `${isCollapsed ? "Expand" : "Collapse"} ${taskSummary.textContent}`);
+      const toggle = () => {
         if (isCollapsed) collapsed.delete(job.id);
         else collapsed.add(job.id);
         render();
@@ -1483,13 +1605,38 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
             `Could not save collapsed cards: ${error instanceof Error ? error.message : String(error)}`
           )
         );
+      };
+      header.addEventListener("click", (event) => {
+        if (event.target instanceof Element && event.target.closest("button")) return;
+        toggle();
       });
-      card.append(collapseToggle);
+      header.addEventListener("keydown", (event) => {
+        if (event.target !== header) return;
+        if (isCollapsed && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+          if (taskSummary.scrollWidth <= taskSummary.clientWidth) return;
+          event.preventDefault();
+          taskSummary.scrollLeft += event.key === "ArrowRight" ? 80 : -80;
+          return;
+        }
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        toggle();
+      });
+      header.append(taskSummary, statusLine);
+      card.append(header);
+      requestAnimationFrame(() => {
+        if (!taskSummary.isConnected) return;
+        if (isCollapsed) {
+          taskSummary.scrollLeft = titleScroll.get(job.id) ?? 0;
+          updateTitleFade(taskSummary);
+        }
+      });
       const program = document.createElement("pre");
       program.className = "program";
       program.textContent = job.command;
       const savedProgramScroll = programScroll.get(job.id) ?? { top: 0, left: 0 };
       program.addEventListener("scroll", () => {
+        if (!program.isConnected) return;
         programScroll.set(job.id, {
           top: program.scrollTop,
           left: program.scrollLeft
@@ -1497,22 +1644,10 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       });
       card.append(program);
       requestAnimationFrame(() => {
+        if (!program.isConnected) return;
         program.scrollTop = savedProgramScroll.top;
         program.scrollLeft = savedProgramScroll.left;
       });
-      if (job.state === "running" && job.expectedMs) {
-        const budget = document.createElement("div");
-        const ratio = elapsedMs / job.expectedMs;
-        budget.className = `budget${ratio > 1 ? " overrun" : ""}`;
-        const fill = document.createElement("span");
-        fill.style.width = `${Math.min(100, ratio * 100)}%`;
-        if (ratio < 1) {
-          fill.className = "advancing";
-          fill.style.animationDuration = `${job.expectedMs - elapsedMs}ms`;
-        }
-        budget.append(fill);
-        card.append(budget);
-      }
       const outputSection = document.createElement("section");
       outputSection.className = "live-output";
       const outputHeader = document.createElement("div");
@@ -1536,10 +1671,13 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       outputHeader.append(tabs);
       const output2 = document.createElement("pre");
       output2.className = "output-view";
+      output2.dataset.stream = activeStream;
       const activeState = streamState(job.id, activeStream);
       activeState.element = output2;
       output2.addEventListener("scroll", () => {
+        if (!output2.isConnected || activeState.restoring) return;
         activeState.scrollTop = output2.scrollTop;
+        activeState.scrollLeft = output2.scrollLeft;
         activeState.followTail = output2.scrollHeight - output2.clientHeight - output2.scrollTop < 16;
       });
       outputSection.append(outputHeader, output2);
@@ -1548,55 +1686,37 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       }
       card.append(outputSection);
       paintOutput(activeState);
-      const technical = document.createElement("details");
-      technical.open = expanded.has(job.id);
-      technical.addEventListener("toggle", () => {
-        if (technical.open) expanded.add(job.id);
-        else expanded.delete(job.id);
-      });
-      const summaryElement = document.createElement("summary");
-      summaryElement.textContent = "Details";
+      const technical = document.createElement("section");
+      technical.className = "technical";
       const list = document.createElement("dl");
       detailRow(list, "Job ID", job.id);
       detailRow(list, "Start", job.startedAt);
       if (job.finishedAt) detailRow(list, "Finish", job.finishedAt);
       detailRow(list, "PGID", String(job.pgid));
       detailRow(list, "Directory", job.jobDir);
-      technical.append(summaryElement, list);
+      technical.append(list);
       card.append(technical);
-      const actions = document.createElement("div");
-      actions.className = "actions";
-      if (job.state === "running") {
-        const stop = document.createElement("button");
-        stop.className = "danger";
-        const confirming = confirmStop?.id === job.id && confirmStop.until > Date.now();
-        stop.textContent = job.cancellationRequested ? "Cancellation requested" : confirming ? "Confirm stop" : "Stop";
-        stop.disabled = job.cancellationRequested;
-        stop.addEventListener("click", () => {
-          if (!sessionId2 || job.cancellationRequested) return;
-          if (!confirming) {
-            confirmStop = { id: job.id, until: Date.now() + 5e3 };
-            render();
-            return;
-          }
-          confirmStop = null;
-          stop.disabled = true;
-          void host.serviceRequest({
-            method: "POST",
-            path: `/jobs/${job.id}/cancel`,
-            query: { session: sessionId2 }
-          }).then(() => refresh()).catch((error) => {
-            showNotice(
-              `Could not request cancellation: ${error instanceof Error ? error.message : String(error)}`
-            );
-            render();
-          });
-        });
-        actions.append(stop);
+      if (job.state === "running" && job.expectedMs) {
+        const budget = document.createElement("div");
+        const ratio = elapsedMs / job.expectedMs;
+        budget.className = `budget${ratio > 1 ? " overrun" : ""}`;
+        budget.setAttribute("role", "progressbar");
+        budget.setAttribute("aria-label", "Estimated duration elapsed");
+        budget.setAttribute("aria-valuemin", "0");
+        budget.setAttribute("aria-valuemax", "100");
+        budget.setAttribute("aria-valuenow", String(Math.min(100, Math.floor(ratio * 100))));
+        const fill = document.createElement("span");
+        fill.style.width = `${Math.min(100, ratio * 100)}%`;
+        if (ratio < 1) {
+          fill.className = "advancing";
+          fill.style.animationDuration = `${job.expectedMs - elapsedMs}ms`;
+        }
+        budget.append(fill);
+        card.append(budget);
       }
-      if (actions.childElementCount > 0) card.append(actions);
       jobsRoot.append(card);
     }
+    if (focusedJobId) jobsRoot.querySelector(`[data-job-id="${focusedJobId}"]`)?.focus();
   }
   async function refresh() {
     const currentSession = sessionId2;
@@ -1617,7 +1737,19 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
       if (generation !== requestGeneration || currentSession !== sessionId2) return;
       if (result.status !== 200) throw new Error(`Service answered ${result.status}`);
       const payload = JSON.parse(result.body);
-      jobs2 = Array.isArray(payload.jobs) ? payload.jobs : [];
+      const nextJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+      if (autoCollapse) {
+        const previous = new Map(jobs2.map((job) => [job.id, job.state]));
+        let changed = false;
+        for (const job of nextJobs) {
+          if (previous.get(job.id) === "running" && job.state === "completed") {
+            collapsed.add(job.id);
+            changed = true;
+          }
+        }
+        if (changed) void saveCollapsed().catch((error) => showNotice(`Could not save collapsed cards: ${String(error)}`));
+      }
+      jobs2 = nextJobs;
       const retained = new Set(jobs2.map((job) => job.id));
       const pruned = new Set([...collapsed].filter((id) => retained.has(id)));
       if (pruned.size !== collapsed.size) {
@@ -1629,6 +1761,7 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
     } catch (error) {
       if (generation !== requestGeneration || currentSession !== sessionId2) return;
       jobsRoot.replaceChildren();
+      toolbar.hidden = true;
       message.hidden = false;
       message.textContent = `Could not read perk jobs: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -1638,10 +1771,10 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
     sessionId2 = session?.id ?? null;
     jobs2 = [];
     collapsed = /* @__PURE__ */ new Set();
-    expanded = /* @__PURE__ */ new Set();
     selectedOutput = /* @__PURE__ */ new Map();
     streamStates = /* @__PURE__ */ new Map();
     programScroll = /* @__PURE__ */ new Map();
+    titleScroll = /* @__PURE__ */ new Map();
     collapseStateReady = false;
     confirmStop = null;
     requestGeneration += 1;
@@ -1653,9 +1786,11 @@ ${state.text.slice(-MAX_OUTPUT_CHARS)}`;
     const loadingSession = sessionId2;
     void Promise.all([
       host.storage.get(storageKey(loadingSession)),
-      host.storage.get(legacyStorageKey(loadingSession))
-    ]).then(([value, legacyValue]) => {
+      host.storage.get(legacyStorageKey(loadingSession)),
+      host.storage.get("auto-collapse-completed")
+    ]).then(([value, legacyValue, preference]) => {
       if (sessionId2 !== loadingSession) return;
+      autoCollapse = preference === true;
       const stored = Array.isArray(value) ? value : legacyValue;
       collapsed = new Set(
         Array.isArray(stored) ? stored.filter((id) => typeof id === "string") : []

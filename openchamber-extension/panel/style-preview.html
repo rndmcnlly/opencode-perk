@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Perk panel: three directions</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 36px max(24px, calc((100vw - 1500px) / 2)); background: #17191d; color: #e1e3e8; }
+      header { margin-bottom: 28px; }
+      h1 { margin: 0 0 7px; font-size: 24px; font-weight: 620; letter-spacing: -.035em; }
+      header p { margin: 0; color: #989da7; font-size: 13px; line-height: 1.5; }
+      main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+      section { min-width: 0; }
+      .heading { min-height: 92px; }
+      .number { font: 11px ui-monospace, SFMono-Regular, monospace; color: #8eabc9; }
+      h2 { font-size: 17px; font-weight: 600; margin: 6px 0 4px; letter-spacing: -.02em; }
+      .heading p { margin: 0; font-size: 12px; line-height: 1.4; color: #9da2aa; }
+      .frame { height: 620px; overflow: hidden; border: 1px solid #40444c; border-radius: 10px; background: #1b1d21; box-shadow: 0 16px 36px #0004; }
+      iframe { display: block; width: 100%; height: 100%; border: 0; color-scheme: dark; }
+      .open { display: inline-block; margin-top: 12px; font-size: 12px; color: #a9c4e7; text-decoration: none; }
+      .open:hover { text-decoration: underline; }
+      @media (max-width: 1000px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+      @media (max-width: 650px) { body { padding: 24px 16px; } main { grid-template-columns: 1fr; } .heading { min-height: 0; margin-bottom: 14px; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Background jobs, three directions</h1>
+      <p>Live production panel with the same mock jobs in each frame. Scroll, change streams, collapse cards, or open a treatment at full width.</p>
+    </header>
+    <main>
+      <section>
+        <div class="heading"><span class="number">01 / QUIET</span><h2>Quiet utility</h2><p>Soft surfaces and breathing room. Output reads as an inset document.</p></div>
+        <div class="frame"><iframe title="Quiet utility panel" src="./?mock=1&amp;style=quiet"></iframe></div>
+        <a class="open" href="./?mock=1&amp;style=quiet" target="_blank">Open full panel ↗</a>
+      </section>
+      <section>
+        <div class="heading"><span class="number">02 / RAIL</span><h2>Activity rail</h2><p>A compact event history. Status markers organize a long-running session.</p></div>
+        <div class="frame"><iframe title="Activity rail panel" src="./?mock=1&amp;style=rail"></iframe></div>
+        <a class="open" href="./?mock=1&amp;style=rail" target="_blank">Open full panel ↗</a>
+      </section>
+      <section>
+        <div class="heading"><span class="number">03 / CONSOLE</span><h2>Console</h2><p>Command and output lead; controls sit in restrained tool chrome.</p></div>
+        <div class="frame"><iframe title="Console panel" src="./?mock=1&amp;style=console"></iframe></div>
+        <a class="open" href="./?mock=1&amp;style=console" target="_blank">Open full panel ↗</a>
+      </section>
+    </main>
+  </body>
+</html>

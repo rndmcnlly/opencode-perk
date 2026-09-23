@@ -1,42 +1,58 @@
 * { box-sizing: border-box; }
-html, body { width: 100%; min-width: 0; margin: 0; min-height: 100%; overflow-x: hidden; }
-body { padding: 12px; }
-#message { font-size: 13px; line-height: 1.45; opacity: 0.7; padding: 18px 4px; }
-#notice { display: none; font-size: 12px; line-height: 1.4; margin-bottom: 8px; padding: 8px; border-radius: 6px; background: color-mix(in srgb, var(--oc-error, currentColor) 12%, transparent); }
-#jobs { display: grid; min-width: 0; gap: 8px; }
-.job { position: relative; width: 100%; min-width: 0; max-width: 100%; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 8px; padding: 10px; }
-.card-header { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding-right: 58px; margin-bottom: 7px; line-height: 1.35; }
-.job.collapsed .card-header { margin-bottom: 0; }
-.job.collapsed > :not(.card-header):not(.collapse-toggle) { display: none; }
-.status-line { display: flex; flex: 0 0 auto; gap: 6px; align-items: baseline; font-size: 11px; }
-.elapsed { opacity: 0.66; }
-.task-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
-.program { max-width: 100%; max-height: 180px; margin: 0; white-space: pre; overflow-wrap: normal; }
-.state { font-weight: 650; opacity: 1; }
+html, body { width: 100%; min-width: 0; min-height: 100%; margin: 0; overflow-x: hidden; }
+body { padding: 12px; background: var(--oc-bg, transparent); color: var(--oc-fg, inherit); font-family: var(--oc-font, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-size: 12px; }
+#message { padding: 18px 4px; font-size: 13px; line-height: 1.45; opacity: .7; }
+#notice { display: none; margin-bottom: 8px; padding: 8px; border-radius: 6px; background: color-mix(in srgb, var(--oc-error, currentColor) 12%, transparent); font-size: 12px; line-height: 1.4; }
+#toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; min-width: 0; margin-bottom: 10px; }
+#toolbar[hidden] { display: none; }
+.toolbar-title { font-size: 12px; font-weight: 650; }
+.toolbar-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.toolbar-controls button { border: 0; padding: 5px 7px; color: color-mix(in srgb, currentColor 75%, transparent); }
+.toolbar-controls button[aria-pressed="true"] { color: var(--oc-primary-text, currentColor); background: color-mix(in srgb, var(--oc-primary, currentColor) 15%, transparent); }
+#jobs { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 9px; }
+.job { position: relative; width: 100%; min-width: 0; max-width: 100%; overflow: hidden; padding: 0; border: 1px solid var(--oc-border, color-mix(in srgb, currentColor 17%, transparent)); border-radius: 7px; background: var(--oc-elevated, color-mix(in srgb, currentColor 3%, transparent)); }
+.card-header { position: relative; display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; min-width: 0; margin: 0; padding: 10px 36px 9px 12px; border-bottom: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 70%, transparent); background: transparent; line-height: 1.35; cursor: pointer; }
+.card-header:hover { background: var(--oc-hover, color-mix(in srgb, currentColor 5%, transparent)); }
+.card-header::after { content: ""; position: absolute; top: 17px; right: 15px; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; opacity: .6; transform: rotate(45deg); }
+.job.collapsed .card-header::after { transform: rotate(-45deg); }
+.job.collapsed .card-header { border-bottom: 0; }
+.job.collapsed > :not(.card-header):not(.budget) { display: none; }
+.status-line { display: flex; flex: 0 1 auto; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; font-family: var(--oc-mono, monospace); font-size: 11px; }
+.elapsed { opacity: .66; }
+.task-summary { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 550; line-height: 1.4; }
+.job.collapsed .task-summary { overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: none; overscroll-behavior-x: contain; touch-action: pan-x; mask-image: linear-gradient(to right, transparent, black var(--title-fade-left, 0px), black calc(100% - var(--title-fade-right, 0px)), transparent); }
+.task-summary::-webkit-scrollbar { display: none; }
+.state { font-weight: 650; }
 .running .state { color: var(--oc-info-text, currentColor); }
 .success .state { color: var(--oc-success-text, currentColor); }
 .failure .state { color: var(--oc-error-text, currentColor); }
-.budget { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 10%, transparent); }
-.budget > span { display: block; height: 100%; border-radius: inherit; background: var(--oc-primary, currentColor); }
+.program { max-width: 100%; max-height: 180px; margin: 0; padding: 10px 12px; overflow: auto; border-radius: 0; border-bottom: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent); color: var(--oc-primary-text, currentColor); background: transparent; font-size: 11px; line-height: 1.45; white-space: pre; overflow-wrap: normal; }
+.program::before { content: "$ "; opacity: .5; }
+.budget { height: 6px; margin: 0; overflow: hidden; border-radius: 0 0 6px 6px; background: var(--oc-muted-surface, color-mix(in srgb, currentColor 10%, transparent)); }
+.budget > span { display: block; height: 100%; background: var(--oc-primary, currentColor); }
 .budget > span.advancing { animation: budget-elapse linear forwards; }
 .budget.overrun > span { background: var(--oc-warning, currentColor); }
 @keyframes budget-elapse { to { width: 100%; } }
-.actions { display: flex; gap: 6px; margin-top: 9px; }
 button { color: inherit; font: inherit; font-size: 11px; padding: 4px 8px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 6px; background: transparent; cursor: pointer; }
 button:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
 button.danger { color: var(--oc-error-text, currentColor); }
-button:disabled { cursor: default; opacity: 0.5; }
-button.collapse-toggle { position: absolute; top: 6px; right: 6px; padding: 3px 6px; border: 0; opacity: 0.7; }
-details { margin-top: 9px; font-size: 11px; }
-summary { cursor: pointer; opacity: 0.65; }
-.live-output { min-width: 0; margin-top: 10px; }
-.output-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 650; }
-.stream-tabs { display: flex; gap: 4px; margin: 8px 0 6px; }
-.output-header .stream-tabs { margin: 0; }
-.stream-tabs button.active { border-color: var(--oc-primary, currentColor); color: var(--oc-primary-text, currentColor); background: color-mix(in srgb, var(--oc-primary, currentColor) 12%, transparent); }
-.output-view { max-width: 100%; min-height: 84px; max-height: 240px; margin: 0; overflow: auto; white-space: pre; overflow-wrap: normal; }
-.output-note { margin-top: 5px; opacity: 0.52; }
-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; margin: 8px 0; }
-dt { opacity: 0.55; }
-dd { margin: 0; overflow-wrap: anywhere; font-family: var(--oc-font-mono, monospace); }
-pre { margin: 7px 0 0; padding: 7px; overflow-x: auto; border-radius: 6px; background: color-mix(in srgb, currentColor 7%, transparent); font-family: var(--oc-font-mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.stop-control { padding: 1px 5px; border-color: var(--oc-border, color-mix(in srgb, currentColor 14%, transparent)); font-family: var(--oc-font, sans-serif); }
+button:disabled { cursor: default; opacity: .5; }
+.card-header:focus-visible, button:focus-visible { outline: 2px solid var(--oc-primary, currentColor); outline-offset: -2px; }
+.live-output { min-width: 0; margin: 0; }
+.output-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 5px 10px; border-bottom: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent); font-size: 11px; font-weight: 650; }
+.output-header > span { font-family: var(--oc-mono, monospace); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
+.stream-tabs { display: flex; gap: 4px; margin: 0; }
+.stream-tabs button { padding: 3px 7px; border: 0; border-radius: 4px; }
+.stream-tabs button.active { color: var(--oc-primary-text, currentColor); background: color-mix(in srgb, var(--oc-primary, currentColor) 12%, transparent); }
+.output-view { max-width: 100%; min-height: 80px; max-height: 240px; margin: 0; padding: 9px 12px; overflow: auto; background: transparent; font-size: 11px; line-height: 1.55; white-space: pre; overflow-wrap: normal; }
+.output-note { margin: 0; padding: 0 12px 8px; opacity: .52; }
+.technical { padding: 8px 12px; border-top: 1px solid color-mix(in srgb, var(--oc-border, currentColor) 65%, transparent); font-size: 11px; }
+.technical dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; margin: 0; }
+dt { opacity: .55; }
+dd { margin: 0; overflow-wrap: anywhere; font-family: var(--oc-mono, monospace); }
+pre { font-family: var(--oc-mono, monospace); }
+@media (max-width: 370px) {
+  .output-header > span { flex-basis: 100%; }
+  .stream-tabs { margin-top: 6px; }
+}

@@ -1,0 +1,128 @@
+/* Mock-only design studies. All colors inherit the OpenChamber host palette. */
+:root[data-preview-style] body {
+  --oc-bg: #1b1d21;
+  --oc-fg: #d8d9dd;
+  --oc-elevated: #24262b;
+  --oc-border: #393c44;
+  --oc-hover: #303239;
+  --oc-muted-surface: #343740;
+  --oc-primary: #8daee4;
+  --oc-primary-text: #b9c9e7;
+  --oc-info-text: #8cb9e1;
+  --oc-warning: #d9ad67;
+  --oc-error-text: #e8a2a2;
+  --oc-success-text: #a5cba6;
+  color: var(--oc-fg);
+  background: var(--oc-bg);
+  font-size: 12px;
+}
+:root[data-preview-theme="light"] body {
+  --oc-bg: #ffffff;
+  --oc-fg: #303744;
+  --oc-elevated: #f8faff;
+  --oc-border: #dce1eb;
+  --oc-hover: #f0f3fa;
+  --oc-muted-surface: #e5eaf3;
+  --oc-primary: #438e67;
+  --oc-primary-text: #365b86;
+  --oc-info-text: #396a9c;
+  --oc-warning: #bb853d;
+  --oc-error-text: #af4f59;
+  --oc-success-text: #42895e;
+}
+:root[data-preview-style] #jobs { gap: 10px; }
+:root[data-preview-style] .job { overflow: hidden; }
+:root[data-preview-style] .card-header { align-items: center; flex-wrap: wrap; row-gap: 4px; }
+:root[data-preview-style] .task-summary { flex: 1 1 100%; font-size: 13px; line-height: 1.4; }
+:root[data-preview-style] .program { max-width: 100%; overflow: auto; font-size: 11px; line-height: 1.45; }
+:root[data-preview-style] .output-header { flex-wrap: wrap; }
+:root[data-preview-style] .output-view { min-height: 80px; font-size: 11px; line-height: 1.55; }
+:root[data-preview-style] .state { color: inherit; }
+:root[data-preview-style] .running .state { color: var(--oc-info-text, #8cb9e1); }
+:root[data-preview-style] .success .state { color: var(--oc-success-text, #a5cba6); }
+:root[data-preview-style] .failure .state { color: var(--oc-error-text, #e8a2a2); }
+:root[data-preview-style] button:focus-visible, :root[data-preview-style] summary:focus-visible {
+  outline: 2px solid var(--oc-primary, #8daee4);
+  outline-offset: 2px;
+}
+
+/* 01: Quiet utility. Air and tonal surfaces, with the output as a readable inset. */
+:root[data-preview-style="quiet"] body { padding: 16px; }
+:root[data-preview-style="quiet"] #jobs { gap: 12px; }
+:root[data-preview-style="quiet"] .job {
+  padding: 15px;
+  border-color: color-mix(in srgb, currentColor 11%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+:root[data-preview-style="quiet"] .card-header { margin-bottom: 12px; }
+:root[data-preview-style="quiet"] .status-line { gap: 9px; letter-spacing: .01em; }
+:root[data-preview-style="quiet"] .task-summary { font-weight: 600; }
+:root[data-preview-style="quiet"] .program {
+  margin: 0 0 13px;
+  padding: 8px 10px;
+  color: color-mix(in srgb, currentColor 76%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+:root[data-preview-style="quiet"] .live-output { margin-top: 14px; }
+:root[data-preview-style="quiet"] .output-header { padding-bottom: 8px; }
+:root[data-preview-style="quiet"] .output-header > span { opacity: .7; }
+:root[data-preview-style="quiet"] .output-view {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, black 13%, transparent);
+}
+:root[data-preview-style="quiet"] .stream-tabs button { border: 0; }
+:root[data-preview-style="quiet"] .stream-tabs button.active { border-radius: 5px; }
+:root[data-preview-style="quiet"] .budget { height: 3px; }
+:root[data-preview-style="quiet"] .actions { justify-content: flex-end; }
+
+/* 02: Activity rail. Thin state edge and condensed list rhythm. */
+:root[data-preview-style="rail"] body { padding: 8px 12px 12px 18px; }
+:root[data-preview-style="rail"] #jobs {
+  gap: 0;
+  border-left: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+:root[data-preview-style="rail"] .job {
+  margin-left: 12px;
+  padding: 12px 10px 14px 14px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 0;
+}
+:root[data-preview-style="rail"] .job::before {
+  content: "";
+  position: absolute;
+  top: 15px;
+  left: -17px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--oc-background, #1b1d21);
+  border-radius: 50%;
+  background: var(--oc-info-text, #8cb9e1);
+  box-sizing: content-box;
+}
+:root[data-preview-style="rail"] .job { overflow: visible; }
+:root[data-preview-style="rail"] .job.success::before { background: var(--oc-success-text, #a5cba6); }
+:root[data-preview-style="rail"] .job.failure::before { background: var(--oc-error-text, #e8a2a2); }
+:root[data-preview-style="rail"] .card-header { padding-right: 56px; margin-bottom: 7px; }
+:root[data-preview-style="rail"] .task-summary { font-weight: 600; }
+:root[data-preview-style="rail"] .program {
+  padding: 0;
+  opacity: .56;
+  background: transparent;
+}
+:root[data-preview-style="rail"] .budget { height: 2px; margin-top: 10px; }
+:root[data-preview-style="rail"] .live-output { margin-top: 13px; }
+:root[data-preview-style="rail"] .output-header { border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); padding-top: 8px; }
+:root[data-preview-style="rail"] .output-header > span { opacity: .6; }
+:root[data-preview-style="rail"] .output-view { padding: 7px 0; background: transparent; }
+:root[data-preview-style="rail"] .stream-tabs button { padding: 3px 6px; border: 0; border-radius: 3px; }
+:root[data-preview-style="rail"] .stream-tabs button.active { background: color-mix(in srgb, currentColor 9%, transparent); }
+
+@media (max-width: 370px) {
+  :root[data-preview-style] .output-header { align-items: flex-start; }
+  :root[data-preview-style] .output-header > span { flex-basis: 100%; }
+  :root[data-preview-style] .stream-tabs { margin-top: 6px; }
+}
