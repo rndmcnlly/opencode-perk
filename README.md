@@ -11,9 +11,9 @@
 
 ## The idea in one sentence
 
-`perk` lets a model fire off a background job and get handed a conversational
-turn when that job finishes, so the model can react to the world instead of
-only responding to the human.
+`perk` lets an agent launch a background job without blocking the conversation,
+then receive progress drips when the job emits them and a final completion
+signal, each as a new conversational turn.
 
 ## The gap it fills
 
@@ -42,6 +42,13 @@ perk is a single tool.
 | `bash_background({ command, timeout?, workdir?, label?, expected_ms?, coalesce_ms? })` | Run a shell command as a detached fire-and-forget job. Returns *immediately* (does not block) with the job's `pgid` and sidecar directory. `workdir` defaults to the session directory; `timeout` defaults to 3600000 ms because background work commonly outlives native `bash`'s two-minute foreground window. `label` and `expected_ms` are optional display hints. When the job finishes, perk injects a turn reporting the outcome and captured-output sizes. A still-running job can push interim turns by appending to `$PERK_DRIP`; `coalesce_ms` controls its quiet-gap interval. |
 
 That's the whole surface.
+
+With the optional [OpenChamber companion panel](./openchamber-extension/README.md),
+those same jobs appear as cards with status, elapsed time, live output, and a
+stop control for running jobs. Here, several audio-processing jobs run side by
+side while the conversation stays responsive:
+
+<a href="./assets/openchamber-background-jobs.png"><img src="./assets/openchamber-background-jobs.png" alt="OpenChamber Background jobs panel showing completed and running jobs, live output, and a Stop control" width="440"></a>
 
 ## How it works (the pattern)
 
