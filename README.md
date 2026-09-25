@@ -76,7 +76,11 @@ When a job's exit file appears, perk injects a turn into the firing session
 describing the outcome (exit code, cancellation, or timeout, and captured-output byte sizes).
 The wake text is generated, not canned. Captured stderr content remains local in
 the reported file and is never copied automatically into the conversation. perk
-does not try to avoid landing a turn
+marks the injected text part with `metadata.source: "opencode-perk"` in the
+OpenCode message API. A client can use this to distinguish perk-originated
+turns from human messages without matching their text; the message role remains
+`user`. Both progress spikes and completion turns carry the marker. perk does
+not try to avoid landing a turn
 mid-flight; an agent that cannot tolerate an interleaved notification should not
 be using perk.
 
