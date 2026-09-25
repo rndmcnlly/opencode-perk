@@ -22,7 +22,9 @@ export const Perk: Plugin = async ({ client }) => {
   const inject = async (sessionID: string, message: string) => {
     await client.session.promptAsync({
       path: { id: sessionID },
-      body: { parts: [{ type: "text", text: message }] },
+      body: {
+        parts: [{ type: "text", text: message, metadata: { source: "opencode-perk" } }],
+      },
     })
   }
   runtime.start()
