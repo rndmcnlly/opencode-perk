@@ -1,5 +1,9 @@
 # perk
 
+[![npm](https://img.shields.io/npm/v/opencode-perk)](https://www.npmjs.com/package/opencode-perk)
+[![publish](https://github.com/rndmcnlly/opencode-perk/actions/workflows/publish.yml/badge.svg)](https://github.com/rndmcnlly/opencode-perk/actions/workflows/publish.yml)
+[![downloads](https://img.shields.io/npm/dm/opencode-perk)](https://www.npmjs.com/package/opencode-perk)
+
 *Background jobs for OpenCode agents that report back when they finish, or
 when they make important progress along the way.*
 
