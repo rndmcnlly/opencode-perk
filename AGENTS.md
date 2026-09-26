@@ -29,6 +29,7 @@ README.md        Conceptual doc + install instructions.
 TESTING.md       Manual, agent-driven self-test protocol.
 package.json     Package metadata and scripts.
 tsconfig.json    ES2022 / ESNext / Bundler resolution, emits declarations.
+.github/workflows/publish.yml  Release-triggered npm publish (trusted publishing).
 os.tmpdir()/opencode/perk/  Runtime spool; one private directory per job.
 .opencode/       Opt-in self-demo symlink dir (see below). Gitignored.
 ```
@@ -60,11 +61,24 @@ The shell writes `result`; only the runtime publishes the authoritative `exit`
 gate. Owned stop requests preserve their first reason and escalate TERM to KILL
 after 1000 ms. New launch records use schema 2; observers normalize schema 1.
 
-Publishing: the agent should NOT run `npm publish`. The npm account has 2FA, so
-publish needs a one-time password (the CLI errors with `EOTP` mid-publish and an
-agent cannot complete the browser auth flow). The version bump, commit, and push
-are fine for the agent to do; Adam runs `npm publish` himself afterward so the
-browser auth flow can complete.
+Publishing goes through GitHub Actions, never a local `npm publish` (the npm
+account has 2FA and the CLI fails with `EOTP`). Publishing a GitHub release runs
+`.github/workflows/publish.yml`, which checks that the tag equals `v` plus the
+`package.json` version, runs `npm ci` and `npm run check`, then publishes
+directly to npmjs.com via trusted publishing (OIDC, no token, automatic
+provenance). A release is irreversible, so create one only when Adam asks:
+
+```bash
+npm version patch                      # or minor/major; commits and tags vX.Y.Z
+git push --follow-tags
+gh release create vX.Y.Z --generate-notes
+gh run watch                           # confirm the publish job succeeds
+```
+
+The trusted publisher is configured on npmjs.com for `rndmcnlly/opencode-perk`
+with workflow filename `publish.yml`; renaming the workflow breaks publishing.
+If the job fails with `ENEEDAUTH`, check that configuration and the workflow's
+`id-token: write` permission.
 
 ## Testing route
 
