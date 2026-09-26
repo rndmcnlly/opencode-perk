@@ -160,7 +160,7 @@ where OpenCode finds it automatically:
 ```bash
 mkdir -p .opencode/plugin
 curl -o .opencode/plugin/perk.js \
-  https://unpkg.com/opencode-perk@0.6.1/dist/perk.js
+  https://unpkg.com/opencode-perk@latest/dist/perk.js
 ```
 
 Use `~/.config/opencode/plugin/` instead for a global install.
